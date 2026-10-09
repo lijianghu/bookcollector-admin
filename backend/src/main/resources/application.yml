@@ -1,0 +1,205 @@
+server:
+  port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+spring:
+  application:
+    name: bookcollector-admin
+
+  # ------------------------------------------------------------------
+  # MongoDB 7.0.30
+  # 驱动由 Spring Boot 2.3.12 管理，版本 4.0.6。
+  # 官方兼容表：4.0 对 MongoDB 7.0 是「⊛ 部分兼容」—— 能连上、能跑 CRUD，
+  # 只是用不到 7.0 的新特性。对第一期（增删改查 + 分页）没有影响。
+  # 若连不上，在 pom.xml 里打开 <mongodb.version>4.11.1</mongodb.version>。
+  # ------------------------------------------------------------------
+  data:
+    mongodb:
+      uri: mongodb://localhost:27017/bookcollector
+      auto-index-creation: false
+
+  # ------------------------------------------------------------------
+  # Redis 3.2.100
+  # ⚠️ Spring Boot 2.3 的前缀是 spring.redis.*，不是 spring.data.redis.*
+  #    客户端是 Lettuce 5.3.x，不会发 CLIENT SETINFO（Redis 7.2 才有的命令），
+  #    所以与 3.2.100 兼容。
+  #
+  # 刻意不配 lettuce.pool.*：启用连接池需要额外引 commons-pool2，
+  # 而本机单用户、同时最多 1 个采集任务，Lettuce 的共享单连接完全够用。
+  # 真要用池（高并发场景）时再加 commons-pool2 并把 pool 段加回来。
+  # ------------------------------------------------------------------
+  redis:
+    host: localhost
+    port: 6379
+    database: 0
+    timeout: 3000ms
+
+  # 关掉 Spring Boot 的启动 banner（日志更干净）
+  main:
+    banner-mode: off
+
+# ------------------------------------------------------------------
+# 微信读书接口
+# ------------------------------------------------------------------
+bookcollector:
+  weread:
+    base-url: https://weread.qq.com/web/bookListInCategory
+    referer: https://weread.qq.com/
+    connect-timeout: 10000
+    read-timeout: 30000
+    # 1 = 每页间隔 1 秒，沿用原 Python 的 time.sleep(1)
+    rate-limit-per-second: 1.0
+    max-retry: 3
+    audit-enabled: true
+
+  # ------------------------------------------------------------------
+  # 登录与鉴权
+  #
+  # ⚠️ 这里的账号密码**不是**登录校验的来源，只是「首次启动时播种的初始管理员」。
+  #    真正的校验对象是 sys_user 集合里的记录（密码存 MD5 摘要，见 util/Md5Util）。
+  #    库里已有同名用户时这段配置完全不生效（见 SeedRunner.seedSysUser 的幂等策略）——
+  #    所以**改密码改库即可**，不用动这里、也不用重启。
+  #    它只在「库是空的」那一次用得上。
+  #
+  # 鉴权本身的配置不在这里，在下面的 sa-token.* 段。
+  # ------------------------------------------------------------------
+  auth:
+    initial-username: admin
+    initial-password: admin123
+    initial-nickname: 管理员
+
+  # ------------------------------------------------------------------
+  # 任务编排
+  # ------------------------------------------------------------------
+  task:
+    # 同时允许运行的采集任务数。
+    # 默认 1：接口限速是全局的（1 秒/页），并发跑两个任务等于把请求频率翻倍，
+    # 有被微信读书限流的风险。对齐 2.5 非功能需求「同时最多 1 个采集任务在跑」。
+    max-concurrent-runs: 1
+    # 采集线程池队列容量，满了直接拒绝（不阻塞 HTTP 线程）
+    queue-capacity: 16
+    run-list-limit: 50
+    log-list-limit: 500
+
+  # ------------------------------------------------------------------
+  # AI 书籍解读（挑一本高质量图书 → 生成解读 → 存本地 → 发语雀）
+  #
+  # ⚠️ 这里只有「代码行为的参数」。**没有密钥** ——
+  #    AI 的 apiKey 在 ai_model 表、语雀 token 在 ai_yuque_token 表、
+  #    分类白名单在 ai_taxonomy_config 表、敏感词表在 ai_sensitive_words 表，
+  #    四张表都由用户在页面上/库里自己维护，程序只读。
+  #
+  # ⚠️ 语雀坐标（namespace / parent-uuid）刻意写在这里而不是做成页面配置：
+  #    做成可配置的话，改坏了只会表现为「发布成功了但目录里找不到」——
+  #    这种静默失败最难查。同 RefreshTarget.ALL 的取舍。
+  # ------------------------------------------------------------------
+  publish:
+    # 解读文章的本地输出目录。
+    # ⚠️ spring-boot:run fork 出来的 JVM 工作目录是 backend/，所以 ../docs
+    #    才落到项目根的 docs/。pom.xml 里另注入了 -DPUBLISH_DIR，优先用它。
+    output-dir: ${PUBLISH_DIR:../docs}
+    # 调 AI 接口的超时。读超时必须显式给：RestTemplate 默认**无限等**，
+    # 对端一旦不回，生成线程会一直挂着，页面永远显示「生成中」。
+    ai-connect-timeout: 10000
+    ai-read-timeout: 180000
+    ai-max-tokens: 8192
+    # 语雀 API 根地址（官方 OpenAPI 的 servers 是 https://www.yuque.com）
+    yuque-base-url: https://www.yuque.com/api/v2
+    # 知识库 namespace（团队 login / 知识库 slug）
+    yuque-namespace: timesaving/met7rq
+    # 「书籍解读」目录节点的 UUID。新文档挂到这个节点下面
+    yuque-parent-uuid: lTQh6UTDXpfRIY3K
+    # 「高质量」判定：评级档位白名单（对应 books.newRatingTitle 的顶层字段）
+    rating-titles:
+      - 神作
+      - 好评如潮
+      - 神作潜力
+      - 脍炙人口
+      - 值得一读
+    # 「高质量」判定：评价人数下限（严格大于）
+    min-rating-count: 500
+    # 初始化候选时一次 bulkWrite 的批大小
+    init-batch-size: 500
+
+# ------------------------------------------------------------------
+# Sa-Token 登录认证
+#
+# 只列了真正需要的项，完整清单（含默认值）见依赖包内的
+# META-INF/spring-configuration-metadata.json，或官网配置文档。
+#
+# ⚠️ 本项目用的是**自定义 loginType**（AuthStpUtil.LOGIN_TYPE =
+#    "bookcollector-admin"），不是 Sa-Token 默认的 StpUtil（loginType="login"）。
+#    所有 Redis key 都带这个前缀 —— 本机 Redis 是 database 0，
+#    多个本地项目共用，不带前缀会出现「登录了 A 项目，B 项目也变成已登录」的串号。
+# ------------------------------------------------------------------
+sa-token:
+  # 前端 axios 发的是 `Authorization: Bearer <token>`
+  # （frontend/src/api/request.ts 的请求拦截器），所以这两项必须成对设置。
+  #
+  # ⚠️ Sa-Token 的裁剪条件是「tokenValue.startsWith(prefix + " ")」，
+  #    即 Bearer 后面那个空格是**必须**的。前端正好是这个格式 ——
+  #    因此这次改造前端零改动。
+  token-name: Authorization
+  token-prefix: Bearer
+
+  # 有效期 30 天，且不因闲置而过期（-1 = 不检查活跃时间）。
+  # 理由：本机单用户工具，频繁要求重新登录只会让人烦；
+  # 真正的安全边界是「只绑 127.0.0.1」和「不落明文密码」，不是 token 时长。
+  timeout: 2592000
+  active-timeout: -1
+
+  # 允许多端同时登录，且同一账号重复登录**复用同一个 token**。
+  # is-share=true 让「刷新页面 → 重新登录」不会把上一次的 token 弄失效，
+  # 本地工具里这比「后登的踢掉先登的」省事得多。
+  is-concurrent: true
+  is-share: true
+
+  # token 形态：32 位无连字符的 uuid（比默认的 xxxx-xxxx-xxxx-xxxx 短、好复制）
+  token-style: simple-uuid
+
+  # 只从**请求头**取 token。刻意关掉「请求参数」和「cookie」两条来源：
+  # token 只有一个入口，排障和审计都不用猜「这次是哪个位置带的」。
+  # 代价：curl 调试必须用 `-H "Authorization: Bearer xxx"`，
+  #      不能像改造前那样拼 `?token=xxx`。
+  is-read-header: true
+  is-read-body: false
+  is-read-cookie: false
+
+  # 不回写响应头。token 只在登录响应体里给一次（data.token），
+  # 之后每个响应都回写等于把凭据撒进所有访问日志和抓包文件里。
+  is-write-header: false
+
+  # 不打 Sa-Token 自己的操作日志（DEBUG 级，本地会刷屏）
+  is-log: false
+  # 不打印启动时的版本字符画
+  is-print: false
+
+# ------------------------------------------------------------------
+# 日志
+#
+# ⚠️ 输出格式与「按天滚动 + 保留 30 天」都在 logback-spring.xml 里定义，
+#    不在这里配 —— 这里只留「级别」。
+#    为什么：
+#    - `logging.pattern.*` 只对 Spring Boot 默认的 appender 生效；我们自定义了
+#      CONSOLE / FILE 两个 appender，写在这里是**死配置**，会让人以为改了有用。
+#    - `logging.file.name` 只能写单文件、**不滚动**，跑几天就是几百 MB。
+#    文件落在 <启动时的工作目录>/logs/bookcollector.log。
+# ------------------------------------------------------------------
+logging:
+  level:
+    root: INFO
+    com.bookcollector: DEBUG
+    # Mongo 驱动的连接日志比较吵，压到 WARN
+    org.mongodb.driver: WARN
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  api-docs:
+    path: /v3/api-docs

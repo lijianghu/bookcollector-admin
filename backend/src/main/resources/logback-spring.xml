@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  日志配置。
+
+  <h3>为什么不用 application.yml 的 logging.file.*</h3>
+  Spring Boot 自带的 `logging.file.name` 只做「写一个文件」，**没有滚动**——
+  跑几天就是一个几百 MB 的单文件。S7 要求「按天滚动 + 保留 30 天」，
+  这必须用 logback 的 `TimeBasedRollingPolicy`，所以配置挪到这里。
+
+  <h3>🔴 两个 appender 的 charset 是「故意不一样」的</h3>
+  - **FILE = UTF-8**：文件要给人看、给脚本 / grep 读，UTF-8 是唯一合理的选择。
+  - **CONSOLE = GB18030**：控制台**不是** UTF-8。
+    本机 `.cmd` 脚本的既定约定是「GBK(cp936) + CRLF + **不写 chcp**」
+    （2026-09-23 定，原因见项目记忆 MEMORY.md：`chcp 65001` + UTF-8 正文
+    会让批处理提前退出），所以 cmd / PowerShell 窗口的代码页一直是 **936**。
+    logback 的 encoder 是**按自己的 charset 编成字节**再写出去的，
+    跟 `System.out`、`-Dfile.encoding` 都无关 ——
+    往 cp936 控制台写 UTF-8 字节，会被当成 GBK 解码 → 中文全乱。
+  - ⚠️ 反过来说：如果哪天把控制台切成 `chcp 65001`，控制台那份会**反过来**乱。
+    文件那份永远是对的。
+  - ⚠️ `pom.xml` 的 `-Dfile.encoding=UTF-8` 管的是 JVM 默认编码，**管不到这里** ——
+    encoder 有自己的 charset 属性，两处是独立的。
+  - ⚠️ GB18030 也编不出 emoji（U+1F600 这类），控制台会显示成 `?`；文件那份正常。
+    生产日志里没有 emoji（emoji 只出现在 InterpretationPrompt 的 prompt 文本里），
+    所以实际无影响。
+
+  <h3>为什么 console 和 file 的 pattern 不一样</h3>
+  - console：`HH:mm:ss.SSS` 就够（人在看，不需要日期），行短一点更好读。
+  - file：**必须带完整日期**。文件是跨天滚动的，同一份内容里混着不同天的记录，
+    只有时间没有日期根本没法定位。
+
+  <h3>关于 `%X{threadId}`</h3>
+  这是 `TraceIdFilter` 塞进 MDC 的 traceId（key 必须叫 `threadId`，
+  因为 `ResultBean` 就是按这个名字取的）。带上它，才能拿接口响应里的 traceId
+  直接到日志里 grep 出整条链路。
+  启动阶段、定时任务、采集线程没有 traceId 时会渲染成 `[]` —— 这是预期的，不是 bug。
+  （采集线程自己 `MDC.put`，见 `TaskRunner`。）
+
+  <h3>日志落在哪</h3>
+  `<项目根>/logs/bookcollector.log`。
+
+  ⚠️ 这个位置不是「碰巧对」的，是靠 `pom.xml` 里给 spring-boot:run 注入的
+  `-DLOG_DIR=${project.basedir}/../logs`（**绝对路径**）保证的。
+  原因：spring-boot:run fork 出来的 JVM，工作目录是 `backend/` 而不是项目根，
+  所以下面的默认值 `logs` 会落到 `backend/logs/` —— 日志「莫名消失」很难查。
+  直接 `java -jar` 跑时没有那个插件参数，会退回默认值 `logs`（相对于当时的 CWD），
+  那时请自己加 `-DLOG_DIR=D:\...\logs`。
+-->
+<configuration>
+
+  <!-- 日志目录。spring-boot:run 会通过 -DLOG_DIR 注入绝对路径；其余场景退回相对路径 -->
+  <property name="LOG_DIR" value="${LOG_DIR:-logs}"/>
+
+  <!-- ==================== 控制台 ==================== -->
+  <!-- ⚠️ charset 必须是 GB18030（控制台代码页是 cp936），**不要**改成 UTF-8 ——
+       改了控制台的中文就会全乱。原因见文件头「两个 appender 的 charset 是故意不一样的」 -->
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level [%X{threadId}] %logger{36} - %msg%n</pattern>
+      <charset>GB18030</charset>
+    </encoder>
+  </appender>
+
+  <!-- ==================== 文件（按天滚动，保留 30 天） ==================== -->
+  <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <!-- 当天正在写的文件。历史文件是 bookcollector.2026-09-22.log 这种 -->
+    <file>${LOG_DIR}/bookcollector.log</file>
+
+    <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+      <fileNamePattern>${LOG_DIR}/bookcollector.%d{yyyy-MM-dd}.log</fileNamePattern>
+      <!-- 保留 30 天。注意：只在滚动那一刻清理，不是定时任务 -->
+      <maxHistory>30</maxHistory>
+    </rollingPolicy>
+
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{threadId}] %logger{36} - %msg%n</pattern>
+      <charset>UTF-8</charset>
+    </encoder>
+  </appender>
+
+  <!--
+    级别不在这里写死。
+    `application.yml` 的 `logging.level.*`（root=INFO、com.bookcollector=DEBUG、
+    org.mongodb.driver=WARN）由 Spring Boot 在加载完本文件之后套用，
+    这里再写一遍就成了两处定义，迟早对不上。
+  -->
+  <root level="INFO">
+    <appender-ref ref="CONSOLE"/>
+    <appender-ref ref="FILE"/>
+  </root>
+
+</configuration>
