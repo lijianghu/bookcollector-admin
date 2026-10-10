@@ -10,7 +10,7 @@ import type {
 /**
  * 图书接口（5 个）。
  *
- * 分页接口直接收 `BookQuery` 的 12 个查询参数 —— 后端 `BookQuery` 是
+ * 分页接口直接收 `BookQuery` 的 14 个查询参数 —— 后端 `BookQuery` 是
  * 一个普通 POJO，Spring 会按字段名绑定，所以前端只要把非空字段拼进 query 即可。
  */
 

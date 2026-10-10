@@ -2,6 +2,8 @@ package com.bookcollector.publish.controller;
 
 import com.bookcollector.common.PageResult;
 import com.bookcollector.common.ResultBean;
+import com.bookcollector.publish.req.InterpretationBatchDeleteRequest;
+import com.bookcollector.publish.req.InterpretationQuery;
 import com.bookcollector.publish.req.PublishConfigRequest;
 import com.bookcollector.publish.service.PublishService;
 import com.bookcollector.publish.vo.InterpretationVO;
@@ -16,8 +18,10 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * AI 书籍解读（挑一本高质量的书 → 生成解读 → 存本地 → 发语雀）。
@@ -84,14 +88,26 @@ public class PublishController {
     }
 
     @Operation(summary = "候选清单分页",
-            description = "status 可传 PENDING / GENERATING / PUBLISHED / FAILED，留空表示全部。"
+            description = "筛选条件与图书库一致：状态 / 书名（模糊）/ 作者（模糊）/ 平台分类（一级）/ "
+                    + "推荐值区间 / 阅读人数下限 / 出版时间区间。留空的条件不参与筛选。"
                     + "返回不含正文（正文几千字一条，列表不需要）")
     @GetMapping("/interpretations")
-    public ResultBean<PageResult<InterpretationVO>> page(
-            @RequestParam(value = "status", required = false) String status,
-            @RequestParam(value = "page", required = false, defaultValue = "1") Integer page,
-            @RequestParam(value = "size", required = false, defaultValue = "20") Integer size) {
-        return ResultBean.ok(service.pageInterpretations(status, page, size));
+    public ResultBean<PageResult<InterpretationVO>> page(InterpretationQuery query) {
+        return ResultBean.ok(service.pageInterpretations(query));
+    }
+
+    @Operation(summary = "批量删除候选清单条目",
+            description = "⚠️ 不限状态 —— 已发布到语雀的也能删。删的是清单里的这一行，"
+                    + "不会删除语雀上的文章，也不影响「发布记录」里的历史流水。"
+                    + "返回实际删除条数（可能与请求条数不同）")
+    @PostMapping("/interpretations/batch-delete")
+    public ResultBean<Map<String, Object>> batchDelete(
+            @Validated @RequestBody InterpretationBatchDeleteRequest req) {
+        long deleted = service.deleteInterpretations(req.getBookIds());
+        Map<String, Object> data = new LinkedHashMap<String, Object>();
+        data.put("requested", req.getBookIds().size());
+        data.put("deleted", deleted);
+        return ResultBean.ok(data);
     }
 
     @Operation(summary = "重置为待解读",

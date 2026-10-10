@@ -33,7 +33,7 @@
 | 类 | 职责 |
 |---|---|
 | `MongoConfig` | `MongoTemplate` 装配 |
-| `MongoIndexInitializer` | `ApplicationRunner`，**启动时显式建 18 个索引** |
+| `MongoIndexInitializer` | `ApplicationRunner`，**启动时显式建 23 个索引 / 覆盖 12 个集合** |
 | `RestTemplateConfig` | `wereadRestTemplate` + `WereadHeaderInterceptor` + `RawResponseErrorHandler` |
 | `WebMvcConfig` | 注册 `AuthInterceptor`（拦截 `/api/**`）+ `@ExtractLoginUser` 参数解析器 |
 | `AsyncConfig` | `collectExecutor` 线程池 + 关停唤醒（`ContextClosedEvent`） |
@@ -89,15 +89,15 @@
                       AuthInterceptor ◄─────────┘  （同属请求链路，但职责独立）
 
 启动期（一次性，顺序不保证）
-  MongoIndexInitializer ──► 18 个索引
-  SeedRunner            ──► taxonomy_config（146 条）+ settings（2 条）+ sys_user（1 条）
-                             taxonomy_config = 一级分类 21 + 二级分类 118 + 榜单 7
+  MongoIndexInitializer ──► 23 个索引（12 个集合）
+  SeedRunner            ──► taxonomy_config（195 条）+ settings（2 条）+ sys_user（1 条）
+                             taxonomy_config = 一级分类 22 + 二级分类 166 + 榜单 7
   InterruptedTaskDetector ──► 把遗留的活跃任务标 INTERRUPTED
 ```
 
 ## 4. 数据集合与索引
 
-`config/MongoIndexInitializer` 是**全部 18 个索引的唯一来源**：
+`config/MongoIndexInitializer` 是**全部 23 个索引的唯一来源**（覆盖 12 个集合）：
 
 | 集合 | 索引 | 类型 |
 |---|---|---|
@@ -113,6 +113,14 @@
 | | `idx_sort` | 普通 |
 | `settings` | `uk_key` | **唯一** |
 | `sys_user` | `uk_username` | **唯一** |
+| `book_interpretations` | `uk_bookId` | **唯一** |
+| | `idx_status_rating (status, newRatingCount DESC, _id)` | 普通 |
+| `publish_record` | `idx_publishedAt`(DESC) | 普通 |
+| `shelf_books` | `uk_bookId` | **唯一** |
+| | `idx_category_addedAt (category, addedAt DESC, _id)` | 普通 |
+
+> 库里业务索引**总数是 26**（= 上面 23 个 + 用户手工在 `ai_sensitive_words`(1) /
+> `ai_taxonomy_config`(2) 上自己建的 3 个）。`MongoIndexInitializer` 不碰那 4 张 `ai_*` 表。
 
 > **为什么不用 `@Indexed` 注解自动建**：唯一索引是幂等写入的**正确性依赖**
 > （不是性能优化），必须显式、可审计、可在启动日志里核对。
@@ -217,9 +225,9 @@ tools/mvn8.sh -f backend/pom.xml -o -B test -Dtest=S1DataLayerTest
 
 ## 9. 已知陷阱（现象 → 根因 → 修法）
 
-### 9.1 启动日志里索引数不是 18
+### 9.1 启动日志里索引数不是 23
 
-- **现象**：日志显示「索引初始化完成：N 个索引」，N ≠ 18。
+- **现象**：日志显示「索引初始化完成：N 个索引」，N ≠ 23。
 - **根因**：改了 `initXxx()` 的返回值却没改 `ensureIndex` 调用数，或反之。
 - **修法**：每个 `initXxx()` 的 `return` 值必须等于该段里 `ensureIndex` 的条数。
   启动日志会打印总数，可以直接核对。

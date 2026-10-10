@@ -1,18 +1,31 @@
 package com.bookcollector.book.req;
 
+import com.bookcollector.util.PublishTimeUtil;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeParseException;
+import java.util.Date;
+
 /**
  * 图书查询条件对象。
  *
  * <p>把「前端传什么」和「Mongo 怎么查」解耦：Controller 收一个 BookQuery，
  * {@code BookRepository} 负责翻译成 {@code Criteria}。
  *
- * <h3>刻意不支持的查询</h3>
- * <b>不做模糊搜索</b>（书名/作者 LIKE）。原 Python 用 {@code category LIKE '%x%'}，
- * 在 MongoDB 里要写正则，而用户明确说了「不需要模糊搜索，不用考虑 mongodb 的性能」。
- * 少一个能力比多一个全表扫的正则更值。
- *
- * <p>因此 {@link #author} 是<b>精确匹配</b>而不是包含匹配 —— 与「不做模糊搜索」
- * 这条约定保持一致，避免这里偷偷长出一个全表扫。
+ * <h3>🔴 2026-10-10 反转：「不做模糊搜索」这条约定已废除</h3>
+ * 原先这里写的是「<b>不做模糊搜索</b>（书名/作者 LIKE）」，理由是原 Python 用
+ * {@code category LIKE '%x%'}，在 MongoDB 里要写正则、用不上索引。
+ * <b>2026-10-10 用户明确要求「书名 / 作者都要模糊搜索」</b>，所以：
+ * <ul>
+ *   <li>{@link #title} 新增，包含匹配；</li>
+ *   <li>{@link #author} 由<b>精确匹配</b>改为<b>包含匹配</b>。</li>
+ * </ul>
+ * <b>代价要说清楚</b>：未锚定的正则用不上索引，这两个条件会让查询退化成
+ * 全集合扫描。本项目单机、几万条数据量，可接受；但这是<b>刻意接受的代价</b>，
+ * 不是「顺手加的」—— 不要再往别的字段上扩散。
+ * 转义与编译统一走 {@link com.bookcollector.util.RegexUtil#contains(String)}。
  *
  * <p><b>⚠️ FR-B2 的「字数区间」没有实现</b>：微信读书这个接口返回的
  * {@code bookInfo} 里<b>没有字数字段</b>（已用 {@code books.json} 的 20 本书样本
@@ -47,7 +60,19 @@ public class BookQuery {
     /** 按采集来源筛：目标 ID */
     private String targetId;
 
-    /** 作者，精确匹配 */
+    /**
+     * 书名，<b>包含匹配</b>（模糊搜索）。
+     *
+     * <p>2026-10-10 新增。空/空白 = 不筛这一项。
+     */
+    private String title;
+
+    /**
+     * 作者，<b>包含匹配</b>（模糊搜索）。
+     *
+     * <p>⚠️ 2026-10-10 之前这里是<b>精确匹配</b>。改成模糊之后，
+     * 搜「余华」能搜到「余华 / 著」这类带后缀的作者串。
+     */
     private String author;
 
     /**
@@ -63,6 +88,26 @@ public class BookQuery {
 
     /** 出版时间上限，形如 {@code "2023-12"}。传 {@code "2023"} 时语义是「2023 年全年」，见 resolveMaxPublishTime() */
     private String maxPublishTime;
+
+    /**
+     * 采集时间下限，形如 {@code "2026-10-01"}（**本地日期**，年月日）。
+     *
+     * <p>2026-10-10 新增。匹配的库字段是 {@code lastCollectedAt}（<b>Date</b>，
+     * 不是字符串）—— 所以这条筛选与出版时间那条走的是<b>两种不同的比较方式</b>：
+     * 出版时间是字符串字典序，这里是真正的日期区间。
+     *
+     * <p>语义是「含当天」：{@code "2026-10-01"} → {@code 2026-10-01 00:00:00.000}。
+     */
+    private String minCollectedAt;
+
+    /**
+     * 采集时间上限，形如 {@code "2026-10-10"}（本地日期，年月日）。
+     *
+     * <p>⚠️ 语义是「<b>含当天整天</b>」：{@code "2026-10-10"} → {@code 2026-10-10 23:59:59.999}，
+     * 而不是当天零点。否则用户选「到 10-10」会漏掉 10 号采集的全部数据 ——
+     * 而这种少数据是<b>静默</b>的，看不出来。见 {@link #resolveMaxCollectedAt()}。
+     */
+    private String maxCollectedAt;
 
     /** 排序字段。可选值见 {@link #resolveSortPath()}，非法值回退到评分 */
     private String sortField = "newRating";
@@ -143,7 +188,12 @@ public class BookQuery {
         return targetType.trim().toLowerCase() + ":" + targetId.trim();
     }
 
-    /** 作者精确匹配值。空白串归一成 null（「没填」而不是「找作者是空字符串的书」） */
+    /** 书名关键词。空白串归一成 null（「没填」而不是「找书名是空字符串的书」） */
+    public String resolveTitle() {
+        return blankToNull(title);
+    }
+
+    /** 作者关键词。空白串归一成 null */
     public String resolveAuthor() {
         return blankToNull(author);
     }
@@ -155,6 +205,9 @@ public class BookQuery {
 
     /**
      * 出版时间上限，把「粗粒度」的输入补齐成可直接做字符串比较的形式。
+     *
+     * <p>补位规则本身在 {@link com.bookcollector.util.PublishTimeUtil#padUpperBound(String)}
+     * —— 候选清单（发布配置页）也要用同一条规则，抽出去避免两处口径漂移。
      *
      * <p>为什么要补：用户填 {@code "2023"} 想表达的是「2023 年全年」，
      * 但 {@code "2023"} 做 {@code $lte} 会把 {@code "2023-08-01 00:00:00"}
@@ -173,17 +226,58 @@ public class BookQuery {
      * 的作用，不会被解析成日期。
      */
     public String resolveMaxPublishTime() {
-        String v = blankToNull(maxPublishTime);
+        return PublishTimeUtil.padUpperBound(maxPublishTime);
+    }
+
+    /**
+     * 采集时间下限 → 当天 <b>00:00:00.000</b>（本地时区）。
+     *
+     * <p>为什么要转成 {@link Date}：{@code lastCollectedAt} 在库里是 BSON date，
+     * 拿字符串去比会永远不匹配（<b>类型敏感，且不报错</b>）——
+     * 这正是本项目在 {@code categories.categoryId} 上踩过的同类坑。
+     *
+     * <p>时区取 {@link ZoneId#systemDefault()}：本机单机跑，用户看到的日期就是本地日期。
+     */
+    public Date resolveMinCollectedAt() {
+        LocalDate d = parseLocalDate(minCollectedAt);
+        if (d == null) {
+            return null;
+        }
+        return Date.from(d.atStartOfDay(ZoneId.systemDefault()).toInstant());
+    }
+
+    /**
+     * 采集时间上限 → 当天 <b>23:59:59.999999999</b>（本地时区）。
+     *
+     * <p>⚠️ 补到当天最后一刻，不是当天零点。用户填「到 2026-10-10」想表达的是
+     * 「包含 10 号一整天」；补零点会把 10 号采到的书全漏掉，而且<b>不报错</b>。
+     * 同一条规则在出版时间上叫 {@code padUpperBound}，只是那边是字符串补位。
+     */
+    public Date resolveMaxCollectedAt() {
+        LocalDate d = parseLocalDate(maxCollectedAt);
+        if (d == null) {
+            return null;
+        }
+        return Date.from(d.atTime(LocalTime.MAX).atZone(ZoneId.systemDefault()).toInstant());
+    }
+
+    /**
+     * 解析 {@code yyyy-MM-dd}（ISO_LOCAL_DATE，前端日期组件固定按这个格式传）。
+     *
+     * <p><b>解析不了就返回 null</b>（= 不筛这一项），不抛异常 —— 见类注释
+     * 「外部传什么脏值都不能让查询出错」。值只可能来自本项目自己的日期组件，
+     * 出现脏值基本意味着有人手改 URL，为它把整个查询打成 500 不值得。
+     */
+    private LocalDate parseLocalDate(String s) {
+        String v = blankToNull(s);
         if (v == null) {
             return null;
         }
-        if (v.length() == 4) {
-            return v + "-12-31 23:59:59";
+        try {
+            return LocalDate.parse(v);
+        } catch (DateTimeParseException e) {
+            return null;
         }
-        if (v.length() == 7) {
-            return v + "-31 23:59:59";
-        }
-        return v;
     }
 
     private String blankToNull(String s) {
@@ -245,6 +339,14 @@ public class BookQuery {
         this.targetId = targetId;
     }
 
+    public String getTitle() {
+        return title;
+    }
+
+    public void setTitle(String title) {
+        this.title = title;
+    }
+
     public String getAuthor() {
         return author;
     }
@@ -267,6 +369,22 @@ public class BookQuery {
 
     public void setMaxPublishTime(String maxPublishTime) {
         this.maxPublishTime = maxPublishTime;
+    }
+
+    public String getMinCollectedAt() {
+        return minCollectedAt;
+    }
+
+    public void setMinCollectedAt(String minCollectedAt) {
+        this.minCollectedAt = minCollectedAt;
+    }
+
+    public String getMaxCollectedAt() {
+        return maxCollectedAt;
+    }
+
+    public void setMaxCollectedAt(String maxCollectedAt) {
+        this.maxCollectedAt = maxCollectedAt;
     }
 
     public String getSortField() {

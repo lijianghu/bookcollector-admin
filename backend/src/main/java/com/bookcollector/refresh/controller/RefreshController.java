@@ -21,11 +21,11 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>只有 3 个端点，而且<b>没有</b>「查历史批次」的接口 —— 本功能只保留
  * 最近一次的执行结果（见 {@code RefreshJob.lastDetails}）。这是刻意的取舍：
  * 用户 2026-10-08 要的是「一键把新数据采回来」，
- * 不是又一套运行流水台账（那套已经有了，在「任务中心」里）。
+ * 不是又一套运行流水台账（那套已经有了，在「任务配置」里）。
  *
  * <p>鉴权由 {@code WebMvcConfig} 统一拦截 {@code /api/**} 覆盖，这里不用额外声明。
  */
-@Tag(name = "09. 定时刷新", description = "7 个榜单 + 期刊杂志的定期全量刷新（不落游标、不建任务）")
+@Tag(name = "09. 增量配置", description = "7 个榜单 + 期刊杂志的定期全量刷新（不落游标、不建任务）")
 @RestController
 @RequestMapping("/api/refresh")
 public class RefreshController {

@@ -29,7 +29,7 @@ import java.util.List;
  *
  * <h3>顺带解决「集合不存在」的问题</h3>
  * 在一个不存在的集合上建索引，MongoDB 会<b>先把集合建出来</b>。
- * 所以这个初始化器跑完，它负责的 10 个集合就一定都存在了 —— 不需要单独写建集合的逻辑。
+ * 所以这个初始化器跑完，它负责的 12 个集合就一定都存在了 —— 不需要单独写建集合的逻辑。
  * （`sys_user` 就是靠这一条建出来的：它没有别的建表入口。）
  *
  * <p>⚠️ 但<b>不是所有集合都走这里</b>：`refresh_jobs` / `ai_publish_job` 以及 4 张
@@ -72,6 +72,8 @@ public class MongoIndexInitializer implements ApplicationRunner {
         created += initSettings();
         created += initSysUser();
         created += initBookInterpretations();
+        created += initPublishRecord();
+        created += initShelfBooks();
 
         log.info("========== 索引初始化完成：{} 个索引，耗时 {} ms ==========",
                 created, System.currentTimeMillis() - start);
@@ -353,6 +355,71 @@ public class MongoIndexInitializer implements ApplicationRunner {
                 .on("newRatingCount", Sort.Direction.DESC)
                 .on("_id", Sort.Direction.ASC)
                 .named("idx_status_rating"));
+
+        return 2;
+    }
+
+    /**
+     * publish_record —— 发布记录流水（2026-10-10 新增）。
+     *
+     * <p>只建 1 个索引：列表就一个查询，按 {@code publishedAt} 倒序翻页。
+     *
+     * <h3>⚠️ 刻意不建唯一索引</h3>
+     * 同一本书可以发布多次（页面的「重置为待解读」明确提示过「重新生成会在语雀里
+     * 新增一篇」），所以 {@code bookId} <b>不能</b>唯一。
+     * {@code yuqueDocId} 理论上一次发布一个、可以唯一，但历史数据由用户用脚本补录
+     * （见 {@code tools/backfill_publish_records.py}），
+     * 一旦旧数据里有重复值，唯一索引会<b>把应用拦在启动之外</b> ——
+     * 代价远大于收益（去重交给补录脚本自己做）。
+     *
+     * <p>它同时是 {@code publish_record} 集合的<b>唯一建表入口</b> ——
+     * 见类注释「顺带解决集合不存在的问题」。
+     */
+    private int initPublishRecord() {
+        IndexOperations ops = mongoTemplate.indexOps("publish_record");
+
+        ops.ensureIndex(new Index()
+                .on("publishedAt", Sort.Direction.DESC)
+                .named("idx_publishedAt"));
+
+        return 1;
+    }
+
+    /**
+     * shelf_books —— 藏书阁（2026-10-10 新增）。
+     *
+     * <p>只建 2 个索引。
+     *
+     * <h3>★ {@code uk_bookId} 是正确性依赖，不是性能优化</h3>
+     * 同一本书在藏书阁里只能有一行 —— 这是「重复添加是幂等的」的前提
+     * （见 {@code ShelfServiceImpl.add}：先查在不在再插，并发下靠这个索引兜底）。
+     *
+     * <p>{@code idx_category_addedAt} 服务「按一级类目取书」：{@code category} 这一段
+     * 用于前缀匹配（{@code ^\Q文学\E(-|$)}，正则带 {@code ^} 锚定、能用上索引）。
+     *
+     * <p>⚠️ 后两段 {@code addedAt} / {@code _id} <b>已不再匹配当前排序</b>：2026-10-10
+     * 列表排序从「按加入时间」改成了「评分优先」（见 {@code ShelfBookRepository.pageBooks}）。
+     * 因为 {@code category} 是<b>前缀范围</b>而非等值，排序本来也用不上索引的后继字段 ——
+     * 实际由 MongoDB 做内存排序；集合只有几千条，这个代价可以接受。
+     * <b>不为了对齐排序去改索引定义</b>：{@code ensureIndex} 不会删旧索引，
+     * 改名/改字段会在库里留下一个孤儿索引。
+     *
+     * <p>它同时是 {@code shelf_books} 集合的<b>唯一建表入口</b> ——
+     * 见类注释「顺带解决集合不存在的问题」。
+     */
+    private int initShelfBooks() {
+        IndexOperations ops = mongoTemplate.indexOps("shelf_books");
+
+        ops.ensureIndex(new Index()
+                .on("bookId", Sort.Direction.ASC)
+                .unique()
+                .named("uk_bookId"));
+
+        ops.ensureIndex(new Index()
+                .on("category", Sort.Direction.ASC)
+                .on("addedAt", Sort.Direction.DESC)
+                .on("_id", Sort.Direction.DESC)
+                .named("idx_category_addedAt"));
 
         return 2;
     }

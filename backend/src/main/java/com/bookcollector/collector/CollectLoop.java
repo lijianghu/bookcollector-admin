@@ -16,7 +16,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 分页采集主循环 —— S2 的技术核心。
@@ -72,6 +74,7 @@ public class CollectLoop {
     private final WereadClient client;
     private final BookParser parser;
     private final BookWriter writer;
+    private final BookCategoryFilter categoryFilter;
     private final CursorStore cursorStore;
     private final ProgressReporter progress;
     private final ApiRequestRepository audit;
@@ -82,6 +85,7 @@ public class CollectLoop {
     public CollectLoop(WereadClient client,
                        BookParser parser,
                        BookWriter writer,
+                       BookCategoryFilter categoryFilter,
                        CursorStore cursorStore,
                        ProgressReporter progress,
                        ApiRequestRepository audit,
@@ -89,6 +93,7 @@ public class CollectLoop {
         this.client = client;
         this.parser = parser;
         this.writer = writer;
+        this.categoryFilter = categoryFilter;
         this.cursorStore = cursorStore;
         this.progress = progress;
         this.audit = audit;
@@ -113,6 +118,24 @@ public class CollectLoop {
         String sourceKey = cmd.sourceKey();
         CollectControl control = cmd.controlOrDefault();
         int maxPages = cmd.effectiveMaxPages();
+
+        // 排除分类（任务级黑名单）。空集时下游 filter 直接原样返回，等价于「不过滤」，
+        // 所以这里不需要再判断「要不要过滤」。
+        Set<String> excludedCodes = cmd.excludeCategoriesOrEmpty();
+        if (!excludedCodes.isEmpty()) {
+            log.info("本次采集排除分类：{}（命中任一标签的图书不写库）", excludedCodes);
+            progress.info(cmd.getRunId(), cmd.getTaskId(),
+                    "排除分类 " + excludedCodes + "（命中的图书不写库）");
+        }
+
+        // 出版月份过滤（只对配了 publishMonth 的目标生效，目前是期刊杂志这一类）。
+        // 数据源接口没有日期参数，非本月的期号只能在解析完之后按 publishTime 挡掉。
+        String publishMonth = cmd.getPublishMonth();
+        if (publishMonth != null) {
+            log.info("本次采集只保留 {} 出版的图书（按 publishTime 过滤）", publishMonth);
+            progress.info(cmd.getRunId(), cmd.getTaskId(),
+                    "只保留 " + publishMonth + " 出版的图书");
+        }
 
         // ---- 起始游标 ----
         // skipCursor = true：全程不碰游标（不读、不重置、不推进）。
@@ -143,6 +166,7 @@ public class CollectLoop {
 
         int page = 0;
         int totalParsed = 0;
+        int totalExcluded = 0;
         int totalSaved = 0;
         int totalInserted = 0;
         Integer totalCount = null;
@@ -208,13 +232,22 @@ public class CollectLoop {
                     break;
                 }
 
-                // ---- 6. 解析 + 落库 ----
-                List<Book> books = parser.parseAll(pageData.getBooks());
+                // ---- 6. 解析 + 过滤 + 落库 ----
+                List<Book> parsed = parser.parseAll(pageData.getBooks());
+                // ★ 排除分类在这里生效：过滤掉的书「解析到了但不写库」。
+                //   放在 upsert 之前而不是之后 —— 写进去再删要多一次写库，
+                //   而且中间那一瞬用户能在图书库里看到它们。
+                List<Book> books = categoryFilter.exclude(parsed, excludedCodes);
+                // ★ 月份过滤：只保留出版月份命中的书（publishMonth=null 时原样返回）。
+                //   同样放在 upsert 之前 —— 老期号压根不写库，而不是写进去再删。
+                books = keepPublishMonth(books, publishMonth);
+                int excluded = parsed.size() - books.size();
                 UpsertStat stat = writer.upsertAll(books, sourceKey);
                 int saved = stat.total();
 
                 page++;
-                totalParsed += books.size();
+                totalParsed += parsed.size();
+                totalExcluded += excluded;
                 totalSaved += saved;
                 totalInserted += stat.getInserted();
                 totalCount = pageData.getTotalCount();
@@ -230,7 +263,8 @@ public class CollectLoop {
                 currentCursor = newCursor;
 
                 // ---- 8. 进度 ----
-                progress.onPage(cmd.getRunId(), page, totalSaved, totalInserted, newCursor, totalCount);
+                progress.onPage(cmd.getRunId(), page, totalSaved, totalInserted,
+                        totalExcluded, newCursor, totalCount);
                 if (listener != null) {
                     try {
                         listener.onProgress(page, totalSaved, totalInserted, totalCount);
@@ -239,9 +273,8 @@ public class CollectLoop {
                         log.warn("进度回调抛异常，已忽略（{} / {}）：{}", type, targetId, e.toString());
                     }
                 }
-                String line = String.format(
-                        "第 %d 页：解析 %d 本、写入 %d 本（其中新增 %d 本），游标 %d → %d，hasMore=%s",
-                        page, books.size(), saved, stat.getInserted(), maxIndex, newCursor, hasMore);
+                String line = buildPageLine(page, parsed.size(), excluded, saved,
+                        stat.getInserted(), maxIndex, newCursor, hasMore);
                 log.info("{}（{} / {}）", line, type, targetId);
                 progress.info(cmd.getRunId(), cmd.getTaskId(), line);
 
@@ -291,6 +324,7 @@ public class CollectLoop {
         CollectResult result = CollectResult.builder()
                 .pagesDone(page)
                 .booksParsed(totalParsed)
+                .booksExcluded(totalExcluded)
                 .booksSaved(totalSaved)
                 .booksInserted(totalInserted)
                 .currentCursor(currentCursor)
@@ -301,11 +335,59 @@ public class CollectLoop {
                 .costMs(cost)
                 .build();
 
-        log.info("采集结束：{} 页 / 解析 {} 本 / 写入 {} 本（其中新增 {} 本）/ 游标 {} / 耗时 {}ms / {}",
-                result.getPagesDone(), result.getBooksParsed(), result.getBooksSaved(),
-                result.getBooksInserted(), result.getCurrentCursor(), result.getCostMs(),
+        log.info("采集结束：{} 页 / 解析 {} 本（排除 {} 本）/ 写入 {} 本（其中新增 {} 本）/ 游标 {} / 耗时 {}ms / {}",
+                result.getPagesDone(), result.getBooksParsed(), result.getBooksExcluded(),
+                result.getBooksSaved(), result.getBooksInserted(), result.getCurrentCursor(),
+                result.getCostMs(),
                 result.isSuccess() ? "成功" : (result.isCanceled() ? "已取消" : "失败：" + errorMsg));
         return result;
+    }
+
+    /**
+     * 只保留「出版月份 == month」的图书（{@code month} 形如 {@code "2026-10"}）。
+     *
+     * <p>{@code month == null}（绝大多数调用方）时原样返回，不做任何复制。
+     * 取不到月份（{@code publishTime} 为空 / 不足 7 位）的书<b>不保留</b> ——
+     * 见 {@code CollectCommand#publishMonth} 的口径说明。
+     */
+    private List<Book> keepPublishMonth(List<Book> books, String month) {
+        if (books == null || books.isEmpty() || month == null) {
+            return books;
+        }
+        List<Book> kept = new ArrayList<Book>(books.size());
+        for (Book book : books) {
+            if (month.equals(monthOf(book.getPublishTime()))) {
+                kept.add(book);
+            }
+        }
+        return kept;
+    }
+
+    /** 从 {@code "2026-10-08 00:00:00"} 取月份（前 7 位）；取不到返回 {@code null} */
+    private String monthOf(String publishTime) {
+        if (publishTime == null || publishTime.length() < 7) {
+            return null;
+        }
+        return publishTime.substring(0, 7);
+    }
+
+    /**
+     * 拼「第 N 页」那一行进度。
+     *
+     * <p>「排除 0 本」不显示 —— 没配排除分类的任务（绝大多数）不该在每一行里
+     * 多看到一个恒为 0 的数字，那只会让人怀疑是不是哪里出了问题。
+     */
+    private String buildPageLine(int page, int parsed, int excluded, int saved,
+                                 int inserted, int fromCursor, int toCursor, boolean hasMore) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("第 ").append(page).append(" 页：解析 ").append(parsed).append(" 本");
+        if (excluded > 0) {
+            sb.append("、排除 ").append(excluded).append(" 本");
+        }
+        sb.append("、写入 ").append(saved).append(" 本（其中新增 ").append(inserted).append(" 本）")
+                .append("，游标 ").append(fromCursor).append(" → ").append(toCursor)
+                .append("，hasMore=").append(hasMore);
+        return sb.toString();
     }
 
     /**

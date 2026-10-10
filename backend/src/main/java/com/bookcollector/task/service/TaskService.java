@@ -65,7 +65,8 @@ public interface TaskService {
      * 这样「目标」和「任务」是 1:1，游标归属才不会有歧义。
      */
     CollectTask create(String name, String targetType, String targetId,
-                       String targetName, Integer maxPages, String remark);
+                       String targetName, Integer maxPages, String remark,
+                       List<String> excludeCategories);
 
     CollectTask get(String taskId);
 
@@ -90,7 +91,8 @@ public interface TaskService {
     // ==================================================================
 
     /**
-     * 编辑任务配置。只允许改 {@code name} / {@code maxPages} / {@code remark}。
+     * 编辑任务配置。只允许改 {@code name} / {@code maxPages} / {@code remark} /
+     * {@code excludeCategories}。
      *
      * <h3>为什么运行中不允许编辑</h3>
      * 一次运行的参数在 {@code launch()} 时就固化成 {@code CollectCommand} 了
@@ -102,8 +104,13 @@ public interface TaskService {
      * 它们是游标的归属键（{@code collect_cursors} 的主键是
      * {@code (targetType, targetId)}）。改了目标等于换了一本账，
      * 而任务名、历史运行记录都还指着旧目标。想换目标就删了重建。
+     *
+     * @param excludeCategories {@code null} = 不改；<b>空列表 = 清空排除</b>。
+     *                          这个字段不能沿用「空 = 不改」的约定，
+     *                          否则用户清空多选框后会发现怎么都删不掉。
      */
-    CollectTask update(String taskId, String name, Integer maxPages, String remark);
+    CollectTask update(String taskId, String name, Integer maxPages, String remark,
+                       List<String> excludeCategories);
 
     /**
      * 删除任务（连带它的运行记录与日志）。

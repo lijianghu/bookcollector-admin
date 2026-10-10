@@ -47,11 +47,12 @@ public class ProgressReporter {
      * @param pagesDone     已完成的页数
      * @param booksSaved    累计写入/更新的图书数
      * @param booksInserted 其中累计<b>新增</b>的图书数（更新数 = {@code booksSaved - booksInserted}）
+     * @param booksExcluded 其中因命中「排除分类」而<b>没写库</b>的图书数。没配排除时恒为 0
      * @param cursor        当前游标值
      * @param totalCount    接口报告的总书数，可为 null
      */
     public void onPage(String runId, int pagesDone, long booksSaved, long booksInserted,
-                       int cursor, Integer totalCount) {
+                       long booksExcluded, int cursor, Integer totalCount) {
         if (runId == null) {
             return;
         }
@@ -59,6 +60,7 @@ public class ProgressReporter {
                 .set("pagesDone", pagesDone)
                 .set("booksSaved", booksSaved)
                 .set("booksInserted", booksInserted)
+                .set("booksExcluded", booksExcluded)
                 .set("currentCursor", cursor)
                 .set("lastProgressAt", new Date());
         if (totalCount != null) {

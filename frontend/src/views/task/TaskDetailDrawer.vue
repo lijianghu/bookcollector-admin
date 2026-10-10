@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { pageRequests } from '@/api/audit'
 import { getRun, getRunLogs, pageRuns } from '@/api/run'
+import { listTaxonomy } from '@/api/taxonomy'
 import { dash, formatDateTime, formatNumber, formatRelative } from '@/utils/format'
 import {
   taskActions,
@@ -63,6 +64,14 @@ const currentRun = ref<TaskRun | null>(null)
 const overviewLoading = ref(false)
 
 const actions = computed<TaskActionState[]>(() => taskActions(props.task?.status))
+
+/**
+ * 本次运行被「排除分类」拦下的本数。
+ *
+ * 0 时不显示 —— 没配排除分类的任务（绝大多数）不该在概览里多看到一个恒为 0 的项，
+ * 那只会让人怀疑是不是配错了什么。
+ */
+const excludedCount = computed(() => currentRun.value?.booksExcluded ?? 0)
 
 /** 运行中但超过 2 分钟没有进度更新 → 可能卡住了 */
 const STALE_MS = 2 * 60 * 1000
@@ -302,6 +311,43 @@ function requestStatusText(row: ApiRequest): string {
 }
 
 // ---------------------------------------------------------------------------
+// 排除分类的名字映射
+// ---------------------------------------------------------------------------
+
+/**
+ * code → 分类名。
+ *
+ * <p>任务里只存 code（一级 `1000000` / 二级 `1000007` 混存），
+ * 直接显示 code 用户认不出来，所以拿字典翻一遍。
+ *
+ * <p>⚠️ 映射不到就原样显示 code —— 字典覆盖不全（实测库里出现过的分类
+ * 比字典多 3 个一级 / 53 个二级），而且用户还能手输 code。
+ * 不能因为查不到名字就把这一项吞掉。
+ */
+const categoryNames = ref<Map<string, string>>(new Map())
+
+async function loadCategoryNames(): Promise<void> {
+  try {
+    // 不带 enabledOnly：停用的分类照样可能被排除，名字也要能显示
+    const cats = await listTaxonomy('CATEGORY')
+    const map = new Map<string, string>()
+    cats.forEach((c) => map.set(c.code, c.name))
+    categoryNames.value = map
+  } catch {
+    categoryNames.value = new Map()
+  }
+}
+
+/** 排除分类的展示文案：字典里有名字就是「名字（code）」，没有就只给 code */
+const excludeTexts = computed<string[]>(() => {
+  const codes = props.task?.excludeCategories ?? []
+  return codes.map((code) => {
+    const name = categoryNames.value.get(code)
+    return name ? `${name}（${code}）` : code
+  })
+})
+
+// ---------------------------------------------------------------------------
 
 async function load(): Promise<void> {
   if (!props.task) {
@@ -310,7 +356,7 @@ async function load(): Promise<void> {
   overviewLoading.value = true
   runPage.value = 1
   try {
-    await Promise.all([loadOverview(), loadRuns()])
+    await Promise.all([loadOverview(), loadRuns(), loadCategoryNames()])
   } finally {
     overviewLoading.value = false
   }
@@ -428,6 +474,9 @@ function trigger(action: TaskActionState): void {
             <el-descriptions-item label="入库图书">
               {{ formatNumber(currentRun?.booksSaved) }}
               <span class="text-muted">（新增 {{ formatNumber(currentRun?.booksInserted) }}）</span>
+              <span v-if="excludedCount > 0" class="excluded-hint">
+                · 排除 {{ formatNumber(currentRun?.booksExcluded) }}
+              </span>
             </el-descriptions-item>
             <el-descriptions-item label="当前游标">
               {{ dash(currentRun?.currentCursor) }}
@@ -521,6 +570,21 @@ function trigger(action: TaskActionState): void {
             </el-descriptions-item>
             <el-descriptions-item label="最近运行 ID" :span="2">
               <span class="text-mono">{{ dash(task?.lastRunId) }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="排除分类" :span="2">
+              <template v-if="excludeTexts.length">
+                <el-tag
+                  v-for="text in excludeTexts"
+                  :key="text"
+                  size="small"
+                  type="warning"
+                  effect="plain"
+                  class="exclude-tag"
+                >
+                  {{ text }}
+                </el-tag>
+              </template>
+              <span v-else class="text-muted">不排除（采到什么就存什么）</span>
             </el-descriptions-item>
             <el-descriptions-item label="备注" :span="2">
               {{ dash(task?.remark) }}
@@ -810,8 +874,17 @@ function trigger(action: TaskActionState): void {
   width: 96px;
   color: #606266;
 }
+/* 排除分类可能有多个，横向排开并允许换行 —— 别把描述表格撑破 */
+.exclude-tag {
+  margin: 2px 6px 2px 0;
+}
 .error-msg {
   margin-top: 12px;
+}
+/* 被排除的本数用橙色点一下 —— 它和「新增」不是一类数字（那个是入库的，这个是没入库的） */
+.excluded-hint {
+  margin-left: 4px;
+  color: #e6a23c;
 }
 
 .actions {

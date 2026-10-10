@@ -20,6 +20,7 @@ import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 
+import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -81,7 +82,7 @@ class TaskControlIT {
         // 从第 0 页开始，测试才可控
         cursorStore.reset(TargetType.CATEGORY, TARGET_ID);
         task = service.create("S3-IT-文学", "CATEGORY", TARGET_ID, TARGET_NAME, MAX_PAGES,
-                "S3 编排验收");
+                "S3 编排验收", Collections.<String>emptyList());
     }
 
     @AfterEach

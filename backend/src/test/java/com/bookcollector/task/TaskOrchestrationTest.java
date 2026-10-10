@@ -24,6 +24,7 @@ import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 
@@ -482,7 +483,7 @@ class TaskOrchestrationTest {
         String targetId = PREFIX + suffix;
         usedTargets.add(targetId);
         CollectTask task = service.create("S3单测-" + suffix, "CATEGORY", targetId,
-                "测试目标-" + suffix, maxPages, "S3 单元测试");
+                "测试目标-" + suffix, maxPages, "S3 单元测试", Collections.<String>emptyList());
         created.add(task.getId());
         return task;
     }

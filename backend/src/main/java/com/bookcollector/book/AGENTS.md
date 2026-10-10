@@ -46,7 +46,7 @@
   - 为什么放 `book.dto` 而不是 `collector.dto`：消费方是 `collector`，
     而 `collector → book` 本来就是单向的，反过来放会形成**包循环**。
   - 谁在用：`collector.BookWriter.upsertAll` → `CollectLoop` → `CollectResult.booksInserted`
-    → 定时刷新页的「新增」列。**仪表盘「今日新增」是另一个口径**（按 `firstCollectedAt` 聚合）。
+    → 增量配置页的「新增」列。**仪表盘「今日新增」是另一个口径**（按 `firstCollectedAt` 聚合）。
 
 ## 3. 调用关系（图谱）
 

@@ -65,6 +65,9 @@ collect_task_runs（进度）+ collect_task_logs（日志）
 | `auth` | 登录鉴权（Sa-Token + `sys_user` + MD5；`@ExtractLoginUser` 注入当前用户） | [`auth/AGENTS.md`](src/main/java/com/bookcollector/auth/AGENTS.md) |
 | `stats` | 仪表盘聚合（口径最讲究） | [`stats/AGENTS.md`](src/main/java/com/bookcollector/stats/AGENTS.md) |
 | `collector` | **采集引擎**：主循环 / 限速 / 重试 / 解析 / 落库 | [`collector/AGENTS.md`](src/main/java/com/bookcollector/collector/AGENTS.md) |
+| `refresh` | **增量配置**：8 个目标的定期**全量重采**（cron / 手动）—— **与「采集任务」是两套东西** | [`refresh/AGENTS.md`](src/main/java/com/bookcollector/refresh/AGENTS.md) |
+| `publish` | **AI 书籍解读**（内容产出侧）：挑一本候选 → AI 写解读 → 落 `docs/` → 发语雀 | [`publish/AGENTS.md`](src/main/java/com/bookcollector/publish/AGENTS.md) |
+| `shelf` | 藏书阁：10 列网格 + 下滑加载；**快照式**存储；图书库可添加 / 移除藏书 | [`shelf/AGENTS.md`](src/main/java/com/bookcollector/shelf/AGENTS.md) |
 | `common` + `config` + `util` + `system` + `setting` | 基础设施（统一返回体、异常、索引初始化、线程池、探针） | [`common/AGENTS.md`](src/main/java/com/bookcollector/common/AGENTS.md) |
 
 **两个知识最密的模块**：`task`（状态机）与 `collector`（数据源事实）。
@@ -72,7 +75,7 @@ collect_task_runs（进度）+ collect_task_logs（日志）
 
 ## 数据集合
 
-9 个集合，**集合名与字段映射不得变更**（既有数据依赖）：
+**18 个集合**（2026-10-10 实测），**集合名与字段映射不得变更**（既有数据依赖）：
 
 | 集合 | 实体 | 说明 |
 |---|---|---|
@@ -85,14 +88,26 @@ collect_task_runs（进度）+ collect_task_logs（日志）
 | `api_requests` | `audit.entity.ApiRequest` | 请求审计记录 |
 | `settings` | `setting.entity.Setting` | 系统配置 KV |
 | `sys_user` | `auth.entity.SysUser` | 登录用户（**密码存 MD5 摘要，不存明文**） |
+| `book_interpretations` | `publish.entity.Interpretation` | AI 解读的候选清单 + 解读记录（**不拆表**） |
+| `publish_record` | `publish.entity.PublishRecord` | 每次成功发布到语雀的流水 |
+| `ai_publish_job` | `publish.entity.PublishJob` | AI 发布配置 + 最近一次结果（**单例**） |
+| `refresh_jobs` | `refresh.entity.RefreshJob` | 增量配置 + 最近一次结果（**单例**） |
+| `shelf_books` | `shelf.entity.ShelfBook` | 藏书阁（**快照式**；图书库里可添加 / 移除藏书） |
+| `ai_model` | `publish.entity.AiModel` | AI 模型配置（**用户手工维护，程序只读**） |
+| `ai_yuque_token` | `publish.entity.AiYuqueToken` | 语雀 token（**同上**） |
+| `ai_taxonomy_config` | `publish.entity.AiTaxonomyItem` | AI 用的分类白名单（**同上**） |
+| `ai_sensitive_words` | `publish.entity.SensitiveWord` | 敏感词表（**同上**） |
 
-**索引**：共 18 个，**全部由 `config.MongoIndexInitializer` 在启动时显式创建**。
+⚠️ 最后 4 张 `ai_*` 表由**用户自己建好并灌数据**，`MongoIndexInitializer` **刻意不碰**
+（给它们补唯一索引看着无害，但一旦库里已有重复值，`ensureIndex` 会抛异常把应用拦在启动之外）。
+
+**索引**：共 23 个，**全部由 `config.MongoIndexInitializer` 在启动时显式创建**。
 `application.yml` 里 `spring.data.mongodb.auto-index-creation: false`，且实体上**不使用** `@Indexed`。
 原因：唯一索引是幂等写入的**正确性依赖**（不是性能优化），必须显式、可审计、可在启动日志里核对。
 
 ## API 路由
 
-统一前缀 `/api`，共 9 个 Controller：
+统一前缀 `/api`，共 13 个 Controller / 55 个端点：
 
 | 前缀 | Controller | 说明 |
 |---|---|---|
@@ -105,6 +120,10 @@ collect_task_runs（进度）+ collect_task_logs（日志）
 | `/api/cursors` | `CursorController` | 采集游标 |
 | `/api/stats` | `StatsController` | 仪表盘 |
 | `/api/requests` | `RequestAuditController` | 请求审计 |
+| `/api/refresh` | `RefreshController` | 增量配置（8 目标全量刷新） |
+| `/api/publish` | `PublishController` | AI 解读：候选清单 / 配置 / 生成并发布 |
+| `/api/publish/records` | `PublishRecordController` | 发布记录 |
+| `/api/shelf` | `ShelfController` | 藏书阁（10 列网格 + 下滑加载；图书库里可添加 / 移除藏书） |
 
 接口文档：`http://localhost:8080/swagger-ui.html`（springdoc，OpenAPI 3）。
 

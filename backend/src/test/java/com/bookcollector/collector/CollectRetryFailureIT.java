@@ -32,6 +32,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -173,7 +174,7 @@ class CollectRetryFailureIT {
         ATTEMPTS.set(0);
         clearTarget();
         CollectTask task = service.create("S7-IT-重试", "CATEGORY", TARGET_ID, TARGET_NAME, 5,
-                "S7 端到端验收：对端异常 / 断网");
+                "S7 端到端验收：对端异常 / 断网", Collections.<String>emptyList());
         taskId = task.getId();
     }
 

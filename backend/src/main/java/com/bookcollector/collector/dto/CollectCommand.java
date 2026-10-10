@@ -7,6 +7,9 @@ import com.bookcollector.common.enums.TargetType;
 import lombok.Builder;
 import lombok.Getter;
 
+import java.util.Collections;
+import java.util.Set;
+
 /**
  * 一次采集的入参。
  *
@@ -34,6 +37,34 @@ public class CollectCommand {
 
     /** 最大页数。{@code null} 或 {@code <= 0} 表示不限（一直翻到 hasMore=false） */
     private Integer maxPages;
+
+    /**
+     * 排除分类 code 集合。命中其中任一 code 的图书<b>不写库</b>。
+     * {@code null} / 空集 = 不排除。
+     *
+     * <p>code 与 {@code Book.BookCategory} 的 {@code categoryId} / {@code subCategoryId}
+     * 比对（一级二级混在同一份集合里，见 {@code collector.BookCategoryFilter}）。
+     *
+     * <p><b>为什么是 Set 而不是 List</b>：过滤是「每本书 × 它挂的每个分类标签」的查找，
+     * 在采集主循环里逐页跑。一页 20 本、一本平均 2 个标签，用 List 也不是不能跑，
+     * 但这是热路径，没理由不做成 O(1)。
+     */
+    private Set<String> excludeCategories;
+
+    /**
+     * 只保留「出版月份 == 该值」的图书，格式 {@code "2026-10"}。{@code null} = 不过滤。
+     *
+     * <p>期刊杂志类目标（定时刷新与「任务配置」两条链路）用它。期刊按期上新，
+     * 一次全量重采会把<b>历史上所有月份</b>的期号都拉回来，而用户只要本月的。
+     * 数据源接口<b>没有日期参数</b>（URL 只有 {@code maxIndex}），
+     * 所以只能在这道闸上按 {@code Book.publishTime} 过滤。
+     *
+     * <p><b>口径</b>：取 {@code publishTime} 的<b>前 7 位</b>比月份
+     * （{@code "2026-10-08 00:00:00"} → {@code "2026-10"}）。取不到月份的书<b>不保留</b>
+     * —— 既然只要本月，无法确认月份的就该挡在外面。
+     * （期刊的 {@code publishTime} 实测无缺失、无脏值，这条兜底只是防御。）
+     */
+    private String publishMonth;
 
     /** 是否忽略已有游标、从 0 开始重采。默认 false（续传） */
     private boolean resetCursor;
@@ -80,6 +111,16 @@ public class CollectCommand {
 
     public CollectControl controlOrDefault() {
         return control == null ? CollectControl.NOOP : control;
+    }
+
+    /**
+     * 归一化后的排除集合，<b>永不为 null</b>。
+     *
+     * <p>采集主循环是热路径，让它少一次判空。空集时 {@code contains()} 恒 false，
+     * 等价于「不排除」，不需要再额外判断「要不要过滤」。
+     */
+    public Set<String> excludeCategoriesOrEmpty() {
+        return excludeCategories == null ? Collections.<String>emptySet() : excludeCategories;
     }
 
     /** 入参自检。缺失必填项时早失败，别跑到一半才发现 */

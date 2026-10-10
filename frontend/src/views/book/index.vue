@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { batchDeleteBooks, deleteBook, getBook, pageBooks } from '@/api/book'
+import { addToShelf, fetchShelfStatus, removeFromShelf } from '@/api/shelf'
 import { listTaxonomy } from '@/api/taxonomy'
 import ProTable from '@/components/ProTable.vue'
 import SearchForm from '@/components/SearchForm.vue'
@@ -89,11 +90,21 @@ const sortField = ref<BookSortField>('newRating')
 const sortAsc = ref(false)
 
 /**
- * 查询条件。与 `BookQuery` 的 12 个参数一一对应。
+ * 查询条件。与 `BookQuery` 的 16 个参数一一对应。
  *
  * `categoryId` 是**数字**（后端按 `categories.categoryId` 精确匹配），
  * 而 `targetId` 是**字符串**（分类的 code 是 "300000"，榜单的 code 是 "rising"）。
  * 两个字段类型不一样，是后端的实际契约，不是笔误。
+ *
+ * `title` / `author` 是**包含匹配**（模糊搜索）—— 后端把它们编译成转义过的正则，
+ * 用不上索引。这是 2026-10-10 用户明确要求的，代价已知并接受。
+ *
+ * <h3>两个时间区间的口径不一样（2026-10-10）</h3>
+ * - `minPublishTime` / `maxPublishTime`：**年月**，格式 `yyyy-MM`。
+ *   后端按**字符串字典序**比较（`publishTime` 在库里就是字符串，还有 `"2022"` 这种脏值）。
+ * - `minCollectedAt` / `maxCollectedAt`：**年月日**，格式 `yyyy-MM-dd`。
+ *   后端转成 `Date` 做真正的日期区间比较（`lastCollectedAt` 是 BSON date）。
+ *   ⚠️ 上限**含当天整天**（后端补到 23:59:59.999）。
  */
 const query = reactive<{
   categoryId?: number
@@ -102,9 +113,12 @@ const query = reactive<{
   minReadingCount?: number
   targetType: '' | 'CATEGORY' | 'RANKING'
   targetId?: string
+  title?: string
   author?: string
   minPublishTime?: string
   maxPublishTime?: string
+  minCollectedAt?: string
+  maxCollectedAt?: string
 }>({
   targetType: '',
 })
@@ -176,6 +190,66 @@ function sourceList(sourceKeys?: string[] | null): string[] {
 // 加载
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 藏书阁：当前页里哪些书已在藏书阁（决定操作列显示「添加藏书」还是「移除藏书」）
+// ---------------------------------------------------------------------------
+
+/**
+ * 已在藏书阁的 bookId（当前页）。
+ *
+ * <p>用数组 + `includes` 而不是 Set：这两个操作都在当前页（≤20 条）范围内，数组足够；
+ * 而且「整体替换」的赋值方式对响应式最稳。
+ */
+const onShelfIds = ref<string[]>([])
+const shelfBusy = ref(false)
+
+function isOnShelf(bookId?: string | null): boolean {
+  return !!bookId && onShelfIds.value.includes(bookId)
+}
+
+/** 拉当前页的藏书状态。失败不影响列表本身（当成「都不在藏书阁」） */
+async function loadShelfStatus(list: Book[]): Promise<void> {
+  const ids = list.map((b) => b.bookId).filter((x): x is string => !!x)
+  if (ids.length === 0) {
+    onShelfIds.value = []
+    return
+  }
+  try {
+    onShelfIds.value = await fetchShelfStatus(ids)
+  } catch {
+    onShelfIds.value = []
+  }
+}
+
+/**
+ * 添加 / 移除藏书（操作列那一个按钮，按状态切换文案）。
+ *
+ * <p>成功后只改本地状态，<b>不整页重拉</b> —— 藏书状态不影响图书列表的筛选 / 排序，
+ * 重拉反而会让用户的滚动位置和翻页丢失。失败则弹 message 并保持原状。
+ */
+async function toggleShelf(row: Book): Promise<void> {
+  const id = row.bookId
+  if (!id || shelfBusy.value) {
+    return
+  }
+  shelfBusy.value = true
+  try {
+    if (isOnShelf(id)) {
+      await removeFromShelf(id)
+      onShelfIds.value = onShelfIds.value.filter((x) => x !== id)
+      ElMessage.success('已从藏书阁移除')
+    } else {
+      const added = await addToShelf(id)
+      onShelfIds.value = onShelfIds.value.concat(id)
+      ElMessage.success(added ? '已添加到藏书阁' : '这本书已在藏书阁中')
+    }
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e))
+  } finally {
+    shelfBusy.value = false
+  }
+}
+
 /** 防止「页码越界纠正」反复触发 */
 let correcting = false
 
@@ -192,6 +266,8 @@ async function load(): Promise<void> {
     const result = await pageBooks(payload)
     rows.value = result.list
     total.value = result.total
+    // 藏书状态跟着这一页一起刷新（失败不影响列表）
+    await loadShelfStatus(result.list)
 
     // 页码越界纠正：在第 3 页删光后 page=3 会返回空列表，用户以为数据没了。
     // 退回最后一页重来一次（只做一次，避免死循环）。
@@ -258,9 +334,12 @@ function handleReset(): void {
   query.minReadingCount = undefined
   query.targetType = ''
   query.targetId = undefined
+  query.title = undefined
   query.author = undefined
   query.minPublishTime = undefined
   query.maxPublishTime = undefined
+  query.minCollectedAt = undefined
+  query.maxCollectedAt = undefined
   page.value = 1
   scheduleReload()
 }
@@ -459,7 +538,7 @@ onMounted(() => {
 
 <template>
   <div class="page">
-    <!-- ================= 筛选栏（12 个查询参数） ================= -->
+    <!-- ================= 筛选栏（16 个查询参数） ================= -->
     <SearchForm
       :model="query"
       :loading="loading"
@@ -468,7 +547,13 @@ onMounted(() => {
       @search="handleSearch"
       @reset="handleReset"
     >
-      <el-form-item label="平台分类">
+      <!--
+        顺序是用户 2026-10-10 指定的：平台分类 → 书名 → 作者 → 出版时间 →
+        推荐值区间 → 阅读人数 → 采集来源 → 采集时间。
+        `span-2` 的项都是「一个标签下放两个控件」或内容较长（平台分类的选项形如
+        「文学（300000）」），单列放不下；正好把 4 列排满 3 行，没有空洞。
+      -->
+      <el-form-item label="平台分类" class="span-2">
         <el-select v-model="query.categoryId" clearable filterable placeholder="全部">
           <el-option
             v-for="opt in categoryOptions"
@@ -477,6 +562,33 @@ onMounted(() => {
             :value="opt.value"
           />
         </el-select>
+      </el-form-item>
+
+      <el-form-item label="书名">
+        <el-input v-model="query.title" clearable placeholder="模糊搜索，含即可" />
+      </el-form-item>
+
+      <el-form-item label="作者">
+        <el-input v-model="query.author" clearable placeholder="模糊搜索，含即可" />
+      </el-form-item>
+
+      <!-- 出版时间：**年月**，两个月份组件。两个都可以空，只填一个也生效 -->
+      <el-form-item label="出版时间" class="span-2">
+        <div class="range">
+          <el-date-picker
+            v-model="query.minPublishTime"
+            type="month"
+            value-format="YYYY-MM"
+            placeholder="起始年月"
+          />
+          <span class="range-sep">~</span>
+          <el-date-picker
+            v-model="query.maxPublishTime"
+            type="month"
+            value-format="YYYY-MM"
+            placeholder="结束年月"
+          />
+        </div>
       </el-form-item>
 
       <el-form-item label="推荐值区间">
@@ -508,11 +620,7 @@ onMounted(() => {
         />
       </el-form-item>
 
-      <el-form-item label="作者">
-        <el-input v-model="query.author" clearable placeholder="精确匹配，不是模糊搜索" />
-      </el-form-item>
-
-      <el-form-item label="采集来源">
+      <el-form-item label="采集来源" class="span-2">
         <div class="range">
           <el-select
             v-model="query.targetType"
@@ -542,17 +650,33 @@ onMounted(() => {
         </div>
       </el-form-item>
 
-      <el-form-item label="出版时间从">
-        <el-input v-model="query.minPublishTime" clearable placeholder="2015 / 2015-06" />
-      </el-form-item>
-
-      <el-form-item label="出版时间到">
-        <el-input v-model="query.maxPublishTime" clearable placeholder="2023 / 2023-12" />
+      <!--
+        采集时间：**年月日**，两个日期组件。
+        ⚠️ 上限是「含当天整天」（后端补到 23:59:59.999）—— 选「到 10-10」要能查到 10 号采的书。
+      -->
+      <el-form-item label="采集时间" class="span-2">
+        <div class="range">
+          <el-date-picker
+            v-model="query.minCollectedAt"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="起始日期"
+          />
+          <span class="range-sep">~</span>
+          <el-date-picker
+            v-model="query.maxCollectedAt"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="结束日期"
+          />
+        </div>
       </el-form-item>
 
       <div class="query-hint">
-        共 12 个查询参数，条件之间是「与」的关系。作者是精确匹配（本期不做模糊搜索）；
-        采集来源要「类型 + 目标」都选才生效。
+        共 16 个查询参数，条件之间是「与」的关系。书名与作者是<b>模糊搜索</b>
+        （包含匹配，大小写不敏感，特殊字符会按字面量处理）；采集来源要「类型 + 目标」都选才生效。
+        两个时间区间都是<b>只填一个也生效</b>：出版时间按<b>年月</b>（后端按字符串字典序比较），
+        采集时间按<b>年月日</b>（后端按日期区间比较，<b>结束日含当天整天</b>）。
       </div>
     </SearchForm>
 
@@ -756,13 +880,17 @@ onMounted(() => {
         <el-table-column
           v-if="cols.isVisible('actions')"
           label="操作"
-          width="168"
+          width="220"
           fixed="right"
           align="center"
         >
           <template #default="{ row }">
             <el-button link type="primary" @click="openDetail(row)">详情</el-button>
             <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+            <!-- 藏书阁：按状态显示一个按钮（已在 → 移除；否则 → 添加） -->
+            <el-button link type="warning" :disabled="shelfBusy" @click="toggleShelf(row)">
+              {{ isOnShelf(row.bookId) ? '移除藏书' : '添加藏书' }}
+            </el-button>
             <el-button link type="danger" :disabled="deleting" @click="confirmDelete(row)">
               删除
             </el-button>
@@ -813,7 +941,7 @@ onMounted(() => {
   padding: 16px;
 }
 
-/* 区间输入：两个数字框 + 中间的波浪号 */
+/* 区间输入：两个控件 + 中间的波浪号 */
 .range {
   display: flex;
   align-items: center;
@@ -824,9 +952,27 @@ onMounted(() => {
   flex: 1;
   min-width: 0;
 }
+/*
+ * ⚠️ `el-date-picker` 默认 `width: 220px`（`--el-date-editor-width`），
+ * 在 flex 行里不放开就会把第二个控件挤出去。`flex: 1 1 0` + `width: auto` 才让它参与分配。
+ */
+.range :deep(.el-date-editor) {
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
+}
 .range-sep {
   color: #909399;
   flex-shrink: 0;
+}
+
+/*
+ * 跨两列。用在「一个标签下要放两个控件」的筛选项（出版时间 / 采集时间 / 采集来源）
+ * 和选项文案较长的平台分类上 —— 单列放不下，会被压到没法用。
+ * 8 个筛选项按 4 列排，正好 3 行排满，没有空洞。
+ */
+.span-2 {
+  grid-column: span 2;
 }
 .source-type {
   width: 104px;

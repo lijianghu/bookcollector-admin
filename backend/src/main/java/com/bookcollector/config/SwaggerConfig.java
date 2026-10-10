@@ -19,7 +19,8 @@ import org.springframework.context.annotation.Configuration;
  * 与 Spring Boot 2.x 的兼容性一直更干净。
  *
  * <h3>为什么声明 securityScheme</h3>
- * 34+ 个端点里有 31 个需要 token。声明之后 Swagger UI 上会多一个 <b>Authorize</b>
+ * 55 个端点里有 52 个需要 token（只有 {@code /api/auth/login} 与 {@code /api/ping**}
+ * 在白名单里）。声明之后 Swagger UI 上会多一个 <b>Authorize</b>
  * 按钮，粘一次 token 就能直接调所有接口 —— 否则手工调试每个端点都要复制粘贴 header。
  * 注意这个声明<b>只是文档层面的提示</b>，真正的校验在
  * {@link com.bookcollector.auth.interceptor.AuthInterceptor}，两处不共享代码（也不该共享：
@@ -35,7 +36,7 @@ public class SwaggerConfig {
         return new OpenAPI()
                 .info(new Info()
                         .title("微信读书图书采集后台 API")
-                        .description("第一期：图书库 / 分类榜单字典 / 采集任务 / 断点续传游标 / 仪表盘统计 / 请求审计。"
+                        .description("第一期：图书库 / 分类配置 / 采集任务 / 断点续传游标 / 仪表盘统计 / 请求审计。"
                                 + "统一返回体为 ResultBean，HTTP 状态码恒为 200，业务结果看 body 里的 code。"
                                 + "除 /api/auth/login 与 /api/ping** 外，所有 /api/** 都需要 token。")
                         .version("1.0.0")

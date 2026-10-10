@@ -91,9 +91,11 @@ public class StatsServiceImpl implements StatsService {
 
         // --- 4 个主指标 ---
         data.put("bookTotal", mongoTemplate.count(new Query(), Book.class));
-        // 分类数只算「一级分类」。字典里现在还有 118 个二级分类，全算进来这个卡片会从
-        // 21 跳到 139；而仪表盘要回答的是「我采了哪几大类」，二级只是采集目标的细分粒度。
-        // 二级清单去「分类榜单」页看。
+        // 分类数只算「一级分类」。库里现在还有 173 个二级分类，全算进来这个卡片会从
+        // 22 跳到 195；而仪表盘要回答的是「我采了哪几大类」，二级只是采集目标的细分粒度。
+        // 二级清单去「分类配置」页看。
+        // （口径：库里 CATEGORY 共 195 条 = 一级 22 + 二级 173。`SeedRunner` 的字典口径是
+        //  22 + 166 = 188，库里多出的 7 条是历史遗留的二级分类。）
         data.put("categoryTotal", countTopCategories(false));
         data.put("taskTotal", mongoTemplate.count(new Query(), CollectTask.class));
         data.put("todayCollected", countCollectedSince(startOfToday()));
@@ -141,8 +143,8 @@ public class StatsServiceImpl implements StatsService {
      * 二级分类（如 {@code category:200003}「历史-历史读物」）现在也是合法采集目标。
      * 原样展示的话，同一个大类会被拆成十几个扇区；更糟的是 {@link #DISTRIBUTION_LIMIT}
      * 只有 30，二级会<b>把一级挤出榜单</b>。所以这里按 {@code parentCode} 把二级的计数
-     * 累加到它的一级上 —— 图上看到的始终是「21 个大类 + 7 个榜单」。
-     * 二级各自的采集量去「任务中心」按任务看。
+     * 累加到它的一级上 —— 图上看到的始终是「22 个大类 + 7 个榜单」。
+     * 二级各自的采集量去「任务配置」按任务看。
      *
      * <p>一个副作用是：同一本书如果既在分类里又在榜单里，会被<b>计两次</b>
      * （各来源一次）。这是对的 —— 两个扇区的和会大于图书总数，因为维度是
@@ -164,7 +166,7 @@ public class StatsServiceImpl implements StatsService {
         );
         List<Document> rows = aggregate(pipeline, "books");
 
-        // 把 "category:300000" 翻成「文学」。字典全量一次查出来做内存映射（现在 146 条），
+        // 把 "category:300000" 翻成「文学」。字典全量一次查出来做内存映射（现在 195 条），
         // 比在管道里 $lookup 一次更省事，也更容易排查（映射不上的会落到 code 上）
         Map<String, String> nameByKey = taxonomyNameMap();
         Map<String, String> parentOf = categoryParentMap();

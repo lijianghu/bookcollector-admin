@@ -3,6 +3,7 @@ package com.bookcollector.publish.repository;
 import com.bookcollector.common.PageResult;
 import com.bookcollector.publish.entity.Interpretation;
 import com.bookcollector.publish.entity.PublishStatus;
+import com.bookcollector.publish.req.InterpretationQuery;
 import com.bookcollector.util.PageQueryUtil;
 
 import com.mongodb.bulk.BulkWriteResult;
@@ -23,6 +24,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * 候选清单 + 解读记录（{@code book_interpretations}）的 Mongo 访问。
@@ -60,6 +62,9 @@ public class InterpretationRepository {
 
     /** 一次 bulkWrite 的批大小。与 {@code BookRepository.IN_QUERY_CHUNK} 同量级 */
     private static final int BATCH_SIZE = 500;
+
+    /** {@code $in} 查询一次最多带多少个 bookId，避免 BSON 文档超过 16MB 上限 */
+    private static final int IN_QUERY_CHUNK = 1000;
 
     /**
      * 挑书时先捞的 {@code _id} 池大小（只投影 {@code _id}），见 {@link #pickOnePending()}。
@@ -304,16 +309,112 @@ public class InterpretationRepository {
     /**
      * 清单分页。<b>不含正文</b> —— 正文由 Service 转 {@code InterpretationVO} 时自然被丢掉。
      *
-     * @param status {@code null} / 空 = 全部；否则按状态精确匹配（大小写不敏感）
+     * <h3>排序：评价人数降序 + {@code _id} 兜底</h3>
+     * 与挑书时的池子排序一致，用户看到的清单顺序和「谁会被先解读」是同一个方向。
+     * {@code _id} 兜底是必须的：评价人数相同的一大批书（榜单里很常见）只按它排序，
+     * 翻页会出现重复行 / 漏行。
+     *
+     * <p>⚠️ 筛选条件里 {@code title} / {@code author} 是<b>未锚定正则</b>，
+     * 用不上索引（见 {@link InterpretationQuery} 类注释）。清单只有几千条，可接受。
      */
-    public PageResult<Interpretation> page(String status, Integer page, Integer size) {
-        Criteria criteria = (status == null || status.trim().isEmpty())
-                ? new Criteria()
-                : Criteria.where("status").is(status.trim().toUpperCase());
+    public PageResult<Interpretation> page(InterpretationQuery q) {
+        InterpretationQuery query = q == null ? new InterpretationQuery() : q;
         Sort sort = Sort.by(Sort.Direction.DESC, "newRatingCount")
                 .and(Sort.by(Sort.Direction.ASC, "_id"));
-        return PageQueryUtil.getPageResult(mongoTemplate, page, size,
-                criteria, Interpretation.class, sort);
+        return PageQueryUtil.getPageResult(mongoTemplate, query.getSafePage(), query.getSafeSize(),
+                buildCriteria(query), Interpretation.class, sort);
+    }
+
+    /**
+     * 把 {@link InterpretationQuery} 翻译成 Mongo 的 {@code Criteria}。
+     *
+     * <p>同 {@code BookRepository.buildCriteria}：用 {@code andOperator} 组合而不是
+     * 连续 {@code query.addCriteria(...)} —— 后者在同一字段上叠加条件时会被覆盖。
+     *
+     * <p>⚠️ {@code categories.categoryId} 与 {@code readingCount} / {@code publishTime}
+     * 这些字段<b>没有</b>声明在 {@code Interpretation} 实体里（实体只声明程序要用的字段），
+     * 但它们是快照文档里真实存在的键，所以直接按原始路径查是对的。
+     */
+    private Criteria buildCriteria(InterpretationQuery q) {
+        List<Criteria> conds = new ArrayList<Criteria>();
+
+        String status = q.resolveStatus();
+        if (status != null) {
+            conds.add(Criteria.where("status").is(status));
+        }
+        Pattern title = q.titlePattern();
+        if (title != null) {
+            conds.add(Criteria.where("title").regex(title));
+        }
+        Pattern author = q.authorPattern();
+        if (author != null) {
+            conds.add(Criteria.where("author").regex(author));
+        }
+        if (q.getCategoryId() != null) {
+            conds.add(Criteria.where("categories.categoryId").is(q.getCategoryId()));
+        }
+        if (q.getMinRating() != null) {
+            conds.add(Criteria.where("newRating").gte(q.getMinRating()));
+        }
+        if (q.getMaxRating() != null) {
+            conds.add(Criteria.where("newRating").lte(q.getMaxRating()));
+        }
+        if (q.getMinReadingCount() != null) {
+            conds.add(Criteria.where("readingCount").gte(q.getMinReadingCount()));
+        }
+        String minPublish = q.resolveMinPublishTime();
+        if (minPublish != null) {
+            // 字符串比较：publishTime 是定长零填充的 "yyyy-MM-dd HH:mm:ss"，字典序 == 时间序
+            conds.add(Criteria.where("publishTime").gte(minPublish));
+        }
+        String maxPublish = q.resolveMaxPublishTime();
+        if (maxPublish != null) {
+            conds.add(Criteria.where("publishTime").lte(maxPublish));
+        }
+
+        if (conds.isEmpty()) {
+            return new Criteria();
+        }
+        if (conds.size() == 1) {
+            return conds.get(0);
+        }
+        return new Criteria().andOperator(conds.toArray(new Criteria[0]));
+    }
+
+    /**
+     * 按 {@code bookId} 批量删除清单条目（2026-10-10 新增）。
+     *
+     * <h3>🔴 不限状态 —— 已发布到语雀的也能删</h3>
+     * 用户 2026-10-10 明确要求。删的是<b>候选清单里的这一行</b>，
+     * 不是语雀上的文章（那个得去语雀删），也不影响 {@code publish_record} 里的历史流水。
+     *
+     * <p>分片执行，避免单次 {@code $in} 过大（同 {@code BookRepository.deleteByBookIds}）。
+     *
+     * @return 实际删除条数（可能与请求条数不同：有的 bookId 已经不在了）
+     */
+    public long deleteByBookIds(Collection<String> bookIds) {
+        if (bookIds == null || bookIds.isEmpty()) {
+            return 0L;
+        }
+        List<String> all = new ArrayList<String>();
+        for (String id : bookIds) {
+            if (id != null && !id.trim().isEmpty()) {
+                all.add(id.trim());
+            }
+        }
+        if (all.isEmpty()) {
+            return 0L;
+        }
+
+        long deleted = 0L;
+        for (int i = 0; i < all.size(); i += IN_QUERY_CHUNK) {
+            List<String> chunk = all.subList(i, Math.min(i + IN_QUERY_CHUNK, all.size()));
+            deleted += mongoTemplate.remove(
+                    Query.query(Criteria.where("bookId").in(chunk)), Interpretation.class)
+                    .getDeletedCount();
+        }
+        log.info("批量删除候选清单：请求 {} 条，实际删除 {} 条", all.size(), deleted);
+        return deleted;
     }
 
     public long countByStatus(String status) {

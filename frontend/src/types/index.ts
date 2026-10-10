@@ -243,7 +243,7 @@ export interface Book {
   collectSource?: string[] | null
 }
 
-/** 图书列表查询条件，对应后端 BookQuery 的 12 个参数 */
+/** 图书列表查询条件，对应后端 BookQuery 的 16 个参数 */
 export interface BookQuery {
   categoryId?: number
   minRating?: number
@@ -251,9 +251,18 @@ export interface BookQuery {
   minReadingCount?: number
   targetType?: TargetType | ''
   targetId?: string
+  /** 书名关键词，包含匹配（模糊搜索） */
+  title?: string
+  /** 作者关键词，包含匹配（模糊搜索） */
   author?: string
+  /** 出版时间下限，`yyyy-MM`（年月）。后端按字符串字典序比较 */
   minPublishTime?: string
+  /** 出版时间上限，`yyyy-MM`（年月）。传 `2023` 时语义是「2023 年全年」 */
   maxPublishTime?: string
+  /** 采集时间下限，`yyyy-MM-dd`（本地日期，含当天） */
+  minCollectedAt?: string
+  /** 采集时间上限，`yyyy-MM-dd`（本地日期，**含当天整天**，后端补到 23:59:59.999） */
+  maxCollectedAt?: string
   sortField?: BookSortField
   asc?: boolean
   page?: number
@@ -343,6 +352,15 @@ export interface CollectTask {
   targetId: string
   targetName?: string | null
   maxPages?: number | null
+  /**
+   * 排除分类 code 列表。命中的图书**不写库**。空数组 / null = 不排除。
+   *
+   * ⚠️ 存的是 code（`"1000007"`）不是名字，一级与二级混存 ——
+   * 一级 `1000000` 排除整个「个人成长」，二级 `1000007` 只掐掉「女性成长」。
+   * 展示时要拿字典映射回名字；**映射不到就直接显示 code**
+   * （字典覆盖不全，实测库里出现过的分类比字典多 3 个一级 / 53 个二级）。
+   */
+  excludeCategories?: string[] | null
   status: TaskStatus
   remark?: string | null
   lastRunId?: string | null
@@ -358,19 +376,28 @@ export interface TaskCreateRequest {
   targetId: string
   targetName?: string
   maxPages?: number
+  /** 排除分类 code 列表。不传或空 = 不排除 */
+  excludeCategories?: string[]
   remark?: string
 }
 
 /**
  * 编辑任务请求。
  *
- * ⚠️ 只有 3 个字段 —— `targetType` / `targetId` **刻意不在里面**。
+ * ⚠️ 只有 4 个字段 —— `targetType` / `targetId` **刻意不在里面**。
  * 它们是游标的归属键，改了会让游标与目标脱钩，所以让「不能改」在类型层面成立。
  */
 export interface TaskUpdateRequest {
   name?: string
   maxPages?: number
   remark?: string
+  /**
+   * 排除分类 code 列表。
+   *
+   * ⚠️ 与 `name` / `remark` 不同，这个字段**空数组是有意义的**（= 清空排除），
+   * 而 `undefined` = 不改。所以编辑时永远要显式传它，别用「空就不传」的写法。
+   */
+  excludeCategories?: string[]
 }
 
 export interface TaskRun {
@@ -388,6 +415,14 @@ export interface TaskRun {
   booksSaved?: number | null
   /** 其中**新增**的本数（库里原本没有这个 bookId）。更新数 = `booksSaved - booksInserted` */
   booksInserted?: number | null
+  /**
+   * 其中因命中任务的「排除分类」而**没写库**的本数。
+   *
+   * ⚠️ 它**不**包含在 `booksSaved` 里 —— 被排除的书压根没写。
+   * 界面要把差额讲清楚，否则「采回来 20 本、只入库 13 本」看起来像丢了数据。
+   * 没配排除分类的任务恒为 0。
+   */
+  booksExcluded?: number | null
   /** 这次运行跑到哪了（进度快照，给界面看）。**续传的权威依据是游标，不是这个** */
   currentCursor?: number | null
   totalCount?: number | null
@@ -685,7 +720,7 @@ export interface RefreshConfigRequest {
 }
 
 // ======================================================================
-// AI 书籍解读（com.bookcollector.publish）
+// 发布配置 / 发布记录（com.bookcollector.publish）
 // ======================================================================
 
 /**
@@ -804,4 +839,99 @@ export interface InterpretationVO {
 export interface PublishConfigRequest {
   cron?: string
   enabled?: boolean
+}
+
+/**
+ * 候选清单的查询条件，对应后端 `InterpretationQuery`。
+ *
+ * <h3>与 `BookQuery` 的关系</h3>
+ * 候选清单是图书库的**完整快照**，所以筛选条件基本一致。刻意**不含**
+ * `targetType` / `targetId`（采集来源）—— 在「找出某本书并删掉它」这个场景下没用。
+ *
+ * ⚠️ `categoryId` 只传**一级分类**的 code：二级分类的 code 是另一个字段，
+ * 传进来恒不匹配、静默返回 0 条（与图书库同源的坑）。
+ */
+export interface InterpretationQuery {
+  /** PENDING / GENERATING / PUBLISHED / FAILED，空 = 全部 */
+  status?: PublishStatus | ''
+  /** 书名关键词，包含匹配 */
+  title?: string
+  /** 作者关键词，包含匹配 */
+  author?: string
+  categoryId?: number
+  minRating?: number
+  maxRating?: number
+  minReadingCount?: number
+  minPublishTime?: string
+  maxPublishTime?: string
+  page?: number
+  size?: number
+}
+
+/**
+ * 一条发布记录（`GET /api/publish/records`）。
+ *
+ * <h3>它是流水账，不是当前状态</h3>
+ * 同一本书可以发布多次（「重置为待解读」会重新生成一篇），每次一条独立记录。
+ * 书名 / 作者 / 分类 / 推荐值都是**发布那一刻**的快照 ——
+ * 图书库里的记录后来被改被删，都不会改写历史。
+ *
+ * ⚠️ 后端**实体直出**（这张表没有大字段，正文只落本地与语雀），
+ * 所以字段名就是 Mongo 里的键名。
+ */
+export interface PublishRecord {
+  id: string
+  bookId?: string | null
+  title?: string | null
+  author?: string | null
+  /** 平台分类，如「文学-经典作品」 */
+  category?: string | null
+  /** 推荐值 0~1000（913 = 91.3%） */
+  newRating?: number | null
+
+  yuqueDocId?: number | null
+  yuqueUrl?: string | null
+  localPath?: string | null
+  model?: string | null
+  promptTokens?: number | null
+  completionTokens?: number | null
+  sensitiveHitCount?: number | null
+  /** MANUAL / SCHEDULED */
+  trigger?: string | null
+
+  /** 发布时间。列表按它倒序 */
+  publishedAt?: string | null
+  createdAt?: string | null
+}
+
+/** ==================================================================
+ * 藏书阁（11. 藏书阁）
+ * ================================================================== */
+
+/**
+ * 藏书阁里的一本书（快照）。
+ *
+ * <h3>数据源</h3>
+ * 后端集合 `shelf_books`（2026-10-10 新建，替代原来的 AI 解读候选清单）。
+ * 字段是**加入藏书阁那一刻**的快照 —— 图书库里的记录后来被改过或被删过，
+ * 都不影响这里；想让某本书从藏书阁消失，用图书库操作列的「移除藏书」。
+ */
+export interface ShelfBook {
+  bookId: string
+  title?: string | null
+  author?: string | null
+  cover?: string | null
+  /** 平台分类，如 文学-经典作品 */
+  category?: string | null
+  /** 推荐值 0~1000 */
+  newRating?: number | null
+  newRatingCount?: number | null
+  readingCount?: number | null
+  intro?: string | null
+}
+
+/** 藏书阁分类导航的一个一级类目（含数量）。类目来自数据本身，不是写死的常量 */
+export interface ShelfCategory {
+  name: string
+  count: number
 }

@@ -5,6 +5,7 @@ import com.bookcollector.book.entity.Book;
 import com.bookcollector.book.req.BookQuery;
 import com.bookcollector.common.PageResult;
 import com.bookcollector.util.PageQueryUtil;
+import com.bookcollector.util.RegexUtil;
 
 import org.bson.Document;
 import org.slf4j.Logger;
@@ -256,10 +257,15 @@ public class BookRepository {
         if (q.getMinReadingCount() != null) {
             conds.add(Criteria.where("readingCount").gte(q.getMinReadingCount()));
         }
+        String title = q.resolveTitle();
+        if (title != null) {
+            // 包含匹配（模糊搜索），正则已转义。见 BookQuery 类注释「2026-10-10 反转」
+            conds.add(Criteria.where("title").regex(RegexUtil.contains(title)));
+        }
         String author = q.resolveAuthor();
         if (author != null) {
-            // 精确匹配。不做正则 —— 见 BookQuery 类注释「刻意不支持的查询」
-            conds.add(Criteria.where("author").is(author));
+            // ⚠️ 2026-10-10 由精确匹配改为包含匹配（用户要求作者也要模糊搜索）
+            conds.add(Criteria.where("author").regex(RegexUtil.contains(author)));
         }
         String minPublish = q.resolveMinPublishTime();
         if (minPublish != null) {
@@ -269,6 +275,18 @@ public class BookRepository {
         String maxPublish = q.resolveMaxPublishTime();
         if (maxPublish != null) {
             conds.add(Criteria.where("publishTime").lte(maxPublish));
+        }
+        // 采集时间（2026-10-10 新增）：lastCollectedAt 是**真正的 Date**，不是字符串 ——
+        // 所以这里传 Date 对象，与上面 publishTime 的字符串字典序比较是两回事。
+        // 拿字符串去比 BSON date 会**恒不匹配且不报错**（本项目在 categoryId 上踩过同类坑）。
+        // 上限已在 BookQuery 里补到当天 23:59:59.999。
+        Date minCollected = q.resolveMinCollectedAt();
+        if (minCollected != null) {
+            conds.add(Criteria.where("lastCollectedAt").gte(minCollected));
+        }
+        Date maxCollected = q.resolveMaxCollectedAt();
+        if (maxCollected != null) {
+            conds.add(Criteria.where("lastCollectedAt").lte(maxCollected));
         }
         String sourceKey = q.resolveSourceKey();
         if (sourceKey != null) {

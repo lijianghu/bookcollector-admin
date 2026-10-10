@@ -18,8 +18,17 @@ public class CollectResult {
     /** 成功采集的页数 */
     private final int pagesDone;
 
-    /** 解析出的图书条数（含后续 upsert 失败的） */
+    /** 解析出的图书条数（含被排除分类过滤掉的、以及后续 upsert 失败的） */
     private final int booksParsed;
+
+    /**
+     * 其中因命中任务的「排除分类」而<b>没写库</b>的条数。
+     *
+     * <p>它包含在 {@link #booksParsed} 里，但不进 {@link #booksSaved}。
+     * 单独列出来是因为「采回来 20 本、只入库 13 本」看起来像丢了数据 ——
+     * 有了这个数才能把差额解释清楚。没配排除分类时恒为 0。
+     */
+    private final int booksExcluded;
 
     /** 实际写入/更新的图书条数 */
     private final int booksSaved;

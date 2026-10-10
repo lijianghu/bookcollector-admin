@@ -1,8 +1,11 @@
 package com.bookcollector.publish.service;
 
 import com.bookcollector.common.PageResult;
+import com.bookcollector.publish.req.InterpretationQuery;
 import com.bookcollector.publish.vo.InterpretationVO;
 import com.bookcollector.publish.vo.PublishJobVO;
+
+import java.util.List;
 
 /**
  * AI 书籍解读（挑一本 → 生成 → 落本地 → 发语雀）。
@@ -34,8 +37,18 @@ public interface PublishService {
     /** 当前 cron，供定时器读取。未配置时返回默认值 */
     String currentCron();
 
-    /** 候选清单分页。{@code status} 为空表示全部 */
-    PageResult<InterpretationVO> pageInterpretations(String status, Integer page, Integer size);
+    /** 候选清单分页。筛选条件见 {@link InterpretationQuery}（留空的条件不参与筛选） */
+    PageResult<InterpretationVO> pageInterpretations(InterpretationQuery query);
+
+    /**
+     * 批量删除候选清单条目（2026-10-10 新增）。
+     *
+     * <p>⚠️ <b>不限状态</b> —— 已发布到语雀的也能删。删的是清单里的这一行，
+     * 不是语雀上的文章（那个得去语雀删），也不影响发布记录里的历史流水。
+     *
+     * @return 实际删除条数（可能与请求条数不同：有的 bookId 已经不在了）
+     */
+    long deleteInterpretations(List<String> bookIds);
 
     // ==================================================================
     // 配置

@@ -1,14 +1,22 @@
 import { request } from './request'
 import type {
+  BatchDeleteResult,
+  InterpretationQuery,
   InterpretationVO,
   PageResult,
   PublishConfigRequest,
   PublishJobVO,
-  PublishStatus,
+  PublishRecord,
 } from '@/types'
 
 /**
- * AI 书籍解读接口。
+ * 发布配置 / 发布记录接口（原 `api/ai.ts`）。
+ *
+ * <h3>2026-10-10 改名与搬家</h3>
+ * 菜单从「AI → 书籍解读」拆成两个一级菜单（发布配置 / 发布记录），
+ * 所以这个文件从 `api/ai.ts` 改名为 `api/publish.ts` —— 与后端 `publish` 包同名，
+ * 也和路由前缀 `/publish/*` 对齐。**引用它的是 `views/publish/config/index.vue`
+ * 与 `views/publish/record/index.vue`**。
  *
  * <h3>一次「执行」只处理一本书</h3>
  * 无论手动点还是定时触发，一次就是「挑一本 → 生成 → 存本地 → 发语雀」。
@@ -26,6 +34,10 @@ import type {
  * （`book_interpretations`，带「待解读」标记），挑书时只查这张表。
  * 已有的一律跳过，所以这个按钮可以反复点。
  */
+
+// ======================================================================
+// 发布配置
+// ======================================================================
 
 /** 页面全量数据：配置 + 脱敏的模型信息 + 两条任务的进度 + 清单统计 */
 export function getPublishJob() {
@@ -72,6 +84,8 @@ export function initCandidates() {
  *
  * ⚠️ 只删「待解读」的，已发布 / 失败 / 生成中的不受影响。
  * 换过分类白名单之后，旧候选已经不再符合条件，需要先清空再重新初始化。
+ *
+ * <p>想删**任意状态**（含已发布）的条目，用 {@link batchDeleteInterpretations}。
  */
 export function clearCandidates() {
   return request<PublishJobVO>({
@@ -95,16 +109,42 @@ export function triggerPublish() {
   })
 }
 
-/** 候选清单分页。`status` 留空 = 全部 */
-export function pageInterpretations(params: {
-  status?: PublishStatus | ''
-  page?: number
-  size?: number
-}) {
+// ======================================================================
+// 候选清单
+// ======================================================================
+
+/**
+ * 候选清单分页。
+ *
+ * 筛选条件与图书库一致（状态 / 书名 / 作者 / 平台分类 / 推荐值区间 /
+ * 阅读人数下限 / 出版时间区间）。
+ *
+ * ⚠️ 空白字符串**可以直接传**：后端 `InterpretationQuery` 会把空串归一成 null
+ * 表示「不筛这一项」。所以这里不做过筛，URL 里可能出现 `title=` 这种空参数 ——
+ * 结果是对的，只是不好看。
+ */
+export function pageInterpretations(query: InterpretationQuery) {
   return request<PageResult<InterpretationVO>>({
     url: '/publish/interpretations',
     method: 'get',
-    params,
+    params: query,
+  })
+}
+
+/**
+ * 批量删除候选清单条目。
+ *
+ * 🔴 **不限状态** —— 已发布到语雀的也能删。删的是清单里的这一行：
+ * - **不会**删除语雀上的文章（那个要去语雀删）；
+ * - **不会**影响「发布记录」里的历史流水。
+ *
+ * 返回**实际**删除数（请求里可能有 bookId 已经不在了）。
+ */
+export function batchDeleteInterpretations(bookIds: string[]) {
+  return request<BatchDeleteResult>({
+    url: '/publish/interpretations/batch-delete',
+    method: 'post',
+    data: { bookIds },
   })
 }
 
@@ -118,5 +158,18 @@ export function resetInterpretation(bookId: string) {
   return request<boolean>({
     url: `/publish/interpretations/${encodeURIComponent(bookId)}/reset`,
     method: 'post',
+  })
+}
+
+// ======================================================================
+// 发布记录
+// ======================================================================
+
+/** 发布记录分页。后端固定按发布时间倒序（最新在前） */
+export function pagePublishRecords(params: { page?: number; size?: number }) {
+  return request<PageResult<PublishRecord>>({
+    url: '/publish/records',
+    method: 'get',
+    params,
   })
 }

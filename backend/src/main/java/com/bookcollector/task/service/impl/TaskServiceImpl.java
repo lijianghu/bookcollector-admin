@@ -24,10 +24,13 @@ import org.springframework.core.task.TaskRejectedException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * {@link TaskService} 的实现。
@@ -75,7 +78,8 @@ public class TaskServiceImpl implements TaskService {
      */
     @Override
     public CollectTask create(String name, String targetType, String targetId,
-                              String targetName, Integer maxPages, String remark) {
+                              String targetName, Integer maxPages, String remark,
+                              List<String> excludeCategories) {
         TargetType type = TargetType.of(targetType);
         if (targetId == null || targetId.trim().isEmpty()) {
             throw new BizException(ResultBean.code_warn, "targetId 不能为空");
@@ -92,6 +96,7 @@ public class TaskServiceImpl implements TaskService {
                 .targetId(tid)
                 .targetName(displayName)
                 .maxPages(normalizeMaxPages(maxPages))
+                .excludeCategories(normalizeExcludeCategories(excludeCategories))
                 .status(TaskStatus.PENDING.name())
                 .remark(remark)
                 .runCount(0)
@@ -99,7 +104,8 @@ public class TaskServiceImpl implements TaskService {
         try {
             CollectTask saved = repository.save(task);
             progress.info(null, saved.getId(), "任务已创建：「" + taskName + "」，目标 "
-                    + displayName + "(" + tid + ")，最大页数 " + describeMaxPages(saved.getMaxPages()));
+                    + displayName + "(" + tid + ")，最大页数 " + describeMaxPages(saved.getMaxPages())
+                    + describeExcludes(saved.getExcludeCategories()));
             return saved;
         } catch (DuplicateKeyException e) {
             throw BizException.duplicate("目标「" + displayName + "」已经有一个任务了，"
@@ -155,7 +161,8 @@ public class TaskServiceImpl implements TaskService {
     // ==================================================================
 
     /**
-     * 编辑任务配置。只允许改 {@code name} / {@code maxPages} / {@code remark}。
+     * 编辑任务配置。只允许改 {@code name} / {@code maxPages} / {@code remark} /
+     * {@code excludeCategories}。
      *
      * <h3>为什么运行中不允许编辑</h3>
      * 一次运行的参数在 {@code launch()} 时就固化成 {@code CollectCommand} 了
@@ -169,7 +176,8 @@ public class TaskServiceImpl implements TaskService {
      * 而任务名、历史运行记录都还指着旧目标。想换目标就删了重建。
      */
     @Override
-    public CollectTask update(String taskId, String name, Integer maxPages, String remark) {
+    public CollectTask update(String taskId, String name, Integer maxPages, String remark,
+                              List<String> excludeCategories) {
         CollectTask task = requireTask(taskId);
         TaskStatus status = TaskStatus.of(task.getStatus());
         if (status.isActive()) {
@@ -187,9 +195,14 @@ public class TaskServiceImpl implements TaskService {
         if (remark != null) {
             sets.put("remark", remark);
         }
+        // ⚠️ 判断条件是 != null，不是「非空」—— 空列表是「清空排除」这个合法意图。
+        // 若写成 !isEmpty()，用户把多选框清空后会发现排除项怎么都删不掉。
+        if (excludeCategories != null) {
+            sets.put("excludeCategories", normalizeExcludeCategories(excludeCategories));
+        }
         if (sets.isEmpty()) {
             throw new BizException(ResultBean.code_warn,
-                    "没有需要修改的字段（name / maxPages / remark 至少给一个）");
+                    "没有需要修改的字段（name / maxPages / remark / excludeCategories 至少给一个）");
         }
         repository.updateTaskFields(taskId, sets);
         log.info("任务已编辑：{}，修改字段 {}", taskId, sets.keySet());
@@ -523,6 +536,44 @@ public class TaskServiceImpl implements TaskService {
             return 0;
         }
         return maxPages;
+    }
+
+    /**
+     * 归一化排除分类列表：去首尾空白、丢空串、按输入顺序去重。
+     *
+     * <p>用 {@link LinkedHashSet} 而不是 {@code HashSet}：去重后的顺序应与用户勾选的顺序
+     * 一致，否则界面上标签的顺序每次刷新都在跳。
+     *
+     * <p>{@code null} / 空都返回<b>空列表</b>（不是 null）—— 让「不排除」在库里只有一种表示，
+     * 免得以后要同时判 {@code null} 和 {@code []} 两种「没排除」。
+     *
+     * <p>⚠️ 这里<b>不校验 code 是否存在于字典</b>。实测字典缺 56 个分类
+     * （库里出现过 22 个一级 / 166 个二级，字典只有 21 / 118），
+     * 强行校验会把用户挡在门外。匹配本来就是按 code 字符串比，不依赖字典。
+     */
+    private List<String> normalizeExcludeCategories(List<String> raw) {
+        if (raw == null || raw.isEmpty()) {
+            return new ArrayList<String>();
+        }
+        Set<String> set = new LinkedHashSet<String>();
+        for (String item : raw) {
+            if (item == null) {
+                continue;
+            }
+            String code = item.trim();
+            if (!code.isEmpty()) {
+                set.add(code);
+            }
+        }
+        return new ArrayList<String>(set);
+    }
+
+    /** 排除分类的日志描述，没配就返回空串（不污染正常日志） */
+    private String describeExcludes(List<String> codes) {
+        if (codes == null || codes.isEmpty()) {
+            return "";
+        }
+        return "，排除分类 " + codes;
     }
 
     private String describeMaxPages(Integer maxPages) {

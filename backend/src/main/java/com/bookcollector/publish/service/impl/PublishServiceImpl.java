@@ -13,12 +13,15 @@ import com.bookcollector.publish.entity.AiTaxonomyItem;
 import com.bookcollector.publish.entity.AiYuqueToken;
 import com.bookcollector.publish.entity.Interpretation;
 import com.bookcollector.publish.entity.PublishJob;
+import com.bookcollector.publish.entity.PublishRecord;
 import com.bookcollector.publish.entity.PublishStatus;
 import com.bookcollector.publish.entity.SensitiveWord;
 import com.bookcollector.publish.prompt.InterpretationPrompt;
+import com.bookcollector.publish.req.InterpretationQuery;
 import com.bookcollector.publish.repository.AiConfigRepository;
 import com.bookcollector.publish.repository.InterpretationRepository;
 import com.bookcollector.publish.repository.PublishJobRepository;
+import com.bookcollector.publish.repository.PublishRecordRepository;
 import com.bookcollector.publish.repository.SensitiveWordRepository;
 import com.bookcollector.publish.service.PublishService;
 import com.bookcollector.publish.vo.InterpretationVO;
@@ -123,6 +126,7 @@ public class PublishServiceImpl implements PublishService {
 
     private final PublishJobRepository jobRepository;
     private final InterpretationRepository interpretationRepository;
+    private final PublishRecordRepository publishRecordRepository;
     private final AiConfigRepository aiConfigRepository;
     private final SensitiveWordRepository sensitiveWordRepository;
     private final AiClient aiClient;
@@ -149,6 +153,7 @@ public class PublishServiceImpl implements PublishService {
 
     public PublishServiceImpl(PublishJobRepository jobRepository,
                               InterpretationRepository interpretationRepository,
+                              PublishRecordRepository publishRecordRepository,
                               AiConfigRepository aiConfigRepository,
                               SensitiveWordRepository sensitiveWordRepository,
                               AiClient aiClient,
@@ -156,6 +161,7 @@ public class PublishServiceImpl implements PublishService {
                               PublishProperties props) {
         this.jobRepository = jobRepository;
         this.interpretationRepository = interpretationRepository;
+        this.publishRecordRepository = publishRecordRepository;
         this.aiConfigRepository = aiConfigRepository;
         this.sensitiveWordRepository = sensitiveWordRepository;
         this.aiClient = aiClient;
@@ -273,13 +279,23 @@ public class PublishServiceImpl implements PublishService {
     }
 
     @Override
-    public PageResult<InterpretationVO> pageInterpretations(String status, Integer page, Integer size) {
-        PageResult<Interpretation> raw = interpretationRepository.page(status, page, size);
+    public PageResult<InterpretationVO> pageInterpretations(InterpretationQuery query) {
+        PageResult<Interpretation> raw = interpretationRepository.page(query);
         List<InterpretationVO> list = new ArrayList<InterpretationVO>();
         for (Interpretation it : raw.getList()) {
             list.add(InterpretationVO.from(it));
         }
         return PageResult.of(list, raw.getTotal(), raw.getPage(), raw.getSize());
+    }
+
+    @Override
+    public long deleteInterpretations(List<String> bookIds) {
+        if (bookIds == null || bookIds.isEmpty()) {
+            throw new BizException(ResultBean.code_warn, "缺少 bookId 列表");
+        }
+        long deleted = interpretationRepository.deleteByBookIds(bookIds);
+        log.info("AI 书籍解读：批量删除候选清单 {} 条（请求 {} 条）", deleted, bookIds.size());
+        return deleted;
     }
 
     // ==================================================================
@@ -652,6 +668,11 @@ public class PublishServiceImpl implements PublishService {
             ok.put("updatedAt", finishedAt);
             interpretationRepository.updateFields(bookId, ok);
 
+            // ---- 7.5 写发布记录（2026-10-10 新增）----
+            // 与候选清单分表：候选清单一本只有一行、状态会被覆盖，
+            // 而「发布记录」是流水账（同一本可以发多次）。
+            writePublishRecord(target, localPath, doc, completion, rep.hits.size(), trigger, finishedAt);
+
             String msg = "《" + nvl(bookTitle) + "》解读已发布到语雀"
                     + (rep.hits.isEmpty() ? "" : "（合规替换 " + rep.hits.size() + " 个词）");
             publishGen(new GenProgress(null, bookTitle, startedAt.getTime(), msg));
@@ -685,6 +706,51 @@ public class PublishServiceImpl implements PublishService {
             } catch (Exception e) {
                 log.error("AI 书籍解读：写执行终态失败", e);
             }
+        }
+    }
+
+    // ==================================================================
+    // 发布记录
+    // ==================================================================
+
+    /**
+     * 把一次成功的发布写成一条流水。
+     *
+     * <h3>🔴 为什么整段 try-catch 吞掉异常</h3>
+     * 走到这里时<b>语雀已经收到文章了</b> —— 主流程是成功的。
+     * 如果因为流水表写不进去（网络抖动、磁盘、序列化问题）而抛出去，
+     * 会被外层的 {@code catch (Throwable)} 接住，把这次发布判成 <b>FAILED</b>，
+     * 于是候选清单里显示「失败」、{@code ai_publish_job} 也记失败 ——
+     * 而实际上文章已经在语雀上了。用户会去重发，语雀里就多出一篇重复的。
+     *
+     * <p>所以这里的选择是：<b>宁可少一条流水，也不能把一次成功的发布判成失败</b>。
+     * 代价是流水可能缺行（日志里有 ERROR，可以事后补）。
+     */
+    private void writePublishRecord(Interpretation target, String localPath, YuqueDoc doc,
+                                    AiCompletion completion, int sensitiveHitCount,
+                                    String trigger, Date publishedAt) {
+        try {
+            PublishRecord record = new PublishRecord();
+            // 图书快照：发布那一刻的值，之后图书库被改被删都不影响这里
+            record.setBookId(target.getBookId());
+            record.setTitle(target.getTitle());
+            record.setAuthor(target.getAuthor());
+            record.setCategory(target.getCategory());
+            record.setNewRating(target.getNewRating());
+            // 发布产物
+            record.setYuqueDocId(doc.getId());
+            record.setYuqueUrl(doc.getUrl());
+            record.setLocalPath(localPath);
+            record.setModel(completion.getModel());
+            record.setPromptTokens(completion.getPromptTokens());
+            record.setCompletionTokens(completion.getCompletionTokens());
+            record.setSensitiveHitCount(sensitiveHitCount);
+            record.setTrigger(trigger);
+            record.setPublishedAt(publishedAt);
+            record.setCreatedAt(publishedAt);
+            publishRecordRepository.insert(record);
+        } catch (Exception e) {
+            log.error("AI 书籍解读：写发布记录失败（本次发布本身已成功，仅流水缺失）", e);
         }
     }
 

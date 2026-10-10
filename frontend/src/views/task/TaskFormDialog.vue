@@ -9,8 +9,8 @@ import type { CollectTask, TargetType, TaxonomyItem } from '@/types'
  * 新建 / 编辑采集任务（一个弹窗两种模式）。
  *
  * <h3>为什么合并成一个弹窗</h3>
- * 两种模式有 3 个字段完全一样（`name` / `maxPages` / `remark`），
- * 拆成两个组件就得把那 3 个 form-item 抄两遍，以后改校验规则要改两处。
+ * 两种模式有 4 个字段完全一样（`name` / `maxPages` / `remark` / `excludeCategories`），
+ * 拆成两个组件就得把那 4 个 form-item 抄两遍，以后改校验规则要改两处。
  * 差别只有一处：**新建要选目标，编辑不能改目标**。
  *
  * <h3>编辑为什么不能改目标</h3>
@@ -48,12 +48,14 @@ const form = reactive<{
   targetType: TargetType
   targetId: string
   maxPages?: number
+  excludeCategories: string[]
   remark: string
 }>({
   name: '',
   targetType: 'CATEGORY',
   targetId: '',
   maxPages: undefined,
+  excludeCategories: [],
   remark: '',
 })
 
@@ -62,9 +64,20 @@ const rules: FormRules = {
   targetId: [{ required: true, message: '请选择采集目标', trigger: 'change' }],
 }
 
-/** 字典。新建时才需要，编辑模式不加载 */
+/** 字典。两种模式都要加载 —— 编辑模式也要能改「排除分类」 */
 const categories = ref<TaxonomyItem[]>([])
 const rankings = ref<TaxonomyItem[]>([])
+
+/**
+ * 分类字典的**全量**副本（含已停用项），只喂给「排除分类」。
+ *
+ * <h3>为什么不复用 categories</h3>
+ * `categories` 拉的是 `enabledOnly=true`（停用的不该再建任务）。
+ * 但「这个分类停用了」和「这个分类的书我不想采」是两件事 ——
+ * 停用的分类照样应该能被排除，否则用户没法给一个已停用的分类兜底。
+ * 再拉一次全量只有 188 条，代价可以忽略，换来的是不碰「可选目标」那条已有逻辑。
+ */
+const allCategories = ref<TaxonomyItem[]>([])
 
 const dictOfCurrentType = computed(() =>
   form.targetType === 'RANKING' ? rankings.value : categories.value,
@@ -131,18 +144,67 @@ const hiddenCount = computed(
   () => dictOfCurrentType.value.length - availableTargets.value.length,
 )
 
+/**
+ * 「排除分类」的候选项 —— 用**完整字典**分组，不做任何剔除。
+ *
+ * <h3>⚠️ 为什么不能复用 availableGroups</h3>
+ * 那个剔掉了「已经有任务的目标」，因为一个目标只能建一个任务。
+ * 但「某个分类已经建了任务」跟「能不能排除它」是两件毫不相干的事 ——
+ * 恰恰是「采个人成长的任务」最需要能排除「个人成长下的女性成长」。
+ * 复用会让用户眼睁睁看着自己最想排除的那一项从列表里消失。
+ *
+ * <h3>为什么只列分类，不列榜单</h3>
+ * 排除是按书的 `categories` 标签匹配的，榜单不是分类标签，
+ * 列进来会让人以为「排除飙升榜」能过滤掉榜单里的书 —— 那是不成立的。
+ */
+const excludeGroups = computed(() => {
+  const toOption = (t: TaxonomyItem) => ({ value: t.code, label: `${t.name}（${t.code}）` })
+  const all = allCategories.value
+
+  const groups: { label: string; options: { value: string; label: string }[] }[] = []
+
+  const tops = all.filter((t) => !t.parentCode)
+  if (tops.length) {
+    groups.push({ label: '一级分类（排除整块）', options: tops.map(toOption) })
+  }
+  for (const parent of tops) {
+    const kids = all.filter((t) => t.parentCode === parent.code)
+    if (kids.length) {
+      groups.push({ label: `${parent.name} 的子分类`, options: kids.map(toOption) })
+    }
+  }
+  return groups
+})
+
+/**
+ * 已选但不在字典里的 code 个数。
+ *
+ * ⚠️ 字典覆盖不全（实测库里出现过的分类比字典多 3 个一级 / 53 个二级），
+ * 所以允许手输 code。手输的值 `el-select` 会自己显示成标签，
+ * 这里只是算个数量，好在提示里说清楚「其中 N 个字典里没有」。
+ */
+const customExcludeCount = computed(() => {
+  const known = new Set<string>()
+  allCategories.value.forEach((t) => known.add(t.code))
+  return form.excludeCategories.filter((code) => !known.has(code)).length
+})
+
 async function loadDict(): Promise<void> {
   try {
     // enabledOnly=true：停用的字典项不该再新建任务
-    const [cats, ranks] = await Promise.all([
+    // 第三项是全量分类，只给「排除分类」用（见 allCategories 的说明）
+    const [cats, ranks, allCats] = await Promise.all([
       listTaxonomy('CATEGORY', true),
       listTaxonomy('RANKING', true),
+      listTaxonomy('CATEGORY'),
     ])
     categories.value = cats
     rankings.value = ranks
+    allCategories.value = allCats
   } catch {
     categories.value = []
     rankings.value = []
+    allCategories.value = []
   }
 }
 
@@ -151,6 +213,7 @@ function resetForm(): void {
   form.targetType = 'CATEGORY'
   form.targetId = ''
   form.maxPages = undefined
+  form.excludeCategories = []
   form.remark = ''
 }
 
@@ -163,6 +226,9 @@ function fillFrom(task: CollectTask | null): void {
   form.targetType = task.targetType
   form.targetId = task.targetId
   form.maxPages = task.maxPages ?? undefined
+  // ⚠️ 必须兜成数组：后端没配过排除时这个字段可能是 null / undefined，
+  // 直接绑到 el-select multiple 上会让它渲染成非受控状态
+  form.excludeCategories = task.excludeCategories ? [...task.excludeCategories] : []
   form.remark = task.remark ?? ''
 }
 
@@ -185,9 +251,8 @@ watch(
     }
     fillFrom(props.mode === 'edit' ? props.task : null)
     formRef.value?.clearValidate()
-    if (props.mode === 'create') {
-      void loadDict()
-    }
+    // 两种模式都加载：编辑模式也要能改「排除分类」，而候选项来自字典
+    void loadDict()
   },
   { immediate: true },
 )
@@ -212,11 +277,14 @@ async function submit(): Promise<void> {
       if (!props.task?.id) {
         return
       }
-      // ⚠️ 只提交 name / maxPages / remark —— 后端也不接受别的字段
+      // ⚠️ 只提交 name / maxPages / remark / excludeCategories —— 后端也不接受别的字段
       const updated = await updateTask(props.task.id, {
         name: form.name,
         maxPages: form.maxPages,
         remark: form.remark,
+        // ⚠️ 必须显式传（哪怕空数组）—— 空数组 = 清空排除，undefined = 不改。
+        // 「空就不传」的写法会让用户永远删不掉已配的排除项。
+        excludeCategories: form.excludeCategories,
       })
       ElMessage.success('任务已保存')
       emit('saved', updated)
@@ -229,6 +297,7 @@ async function submit(): Promise<void> {
         // 目标名快照：任务建完之后，即使字典项被删/改名，任务里也还知道自己在采什么
         targetName: target?.name,
         maxPages: form.maxPages,
+        excludeCategories: form.excludeCategories,
         remark: form.remark,
       })
       ElMessage.success('任务已创建')
@@ -335,6 +404,40 @@ function handleClose(): void {
         留空或填 0 表示不限制，会一直翻到接口说没有下一页。想先试跑就填个 1~2。
       </div>
 
+      <el-form-item label="排除分类">
+        <el-select
+          v-model="form.excludeCategories"
+          multiple
+          filterable
+          allow-create
+          default-first-option
+          collapse-tags
+          collapse-tags-tooltip
+          :max-collapse-tags="3"
+          placeholder="不选 = 不排除任何分类"
+          class="exclude-select"
+        >
+          <el-option-group v-for="g in excludeGroups" :key="g.label" :label="g.label">
+            <el-option
+              v-for="opt in g.options"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-option-group>
+        </el-select>
+      </el-form-item>
+      <div class="field-hint">
+        命中的图书<b>不会写进图书库</b>。一本书通常同时挂 2~4 个分类标签，
+        只要其中<b>任意一个</b>命中这里的 code，整本就被跳过 ——
+        所以排除「女性成长 1000007」之后，一本同时属于「文学」和「女性成长」的书，
+        在采「文学」时也会被跳过。
+        <template v-if="customExcludeCount > 0">
+          其中 {{ customExcludeCount }} 个不在字典里，将按 code 直接匹配。
+        </template>
+        字典里没有的分类可以直接输 code 回车。
+      </div>
+
       <el-form-item label="备注">
         <el-input
           v-model="form.remark"
@@ -361,6 +464,12 @@ function handleClose(): void {
 }
 
 .form :deep(.el-input-number) {
+  width: 100%;
+}
+
+/* el-select 在 el-form-item 里默认就能撑满，这里显式写一遍是防止以后
+   有人给 .form 加了 flex 布局把它挤成内容宽度 */
+.exclude-select {
   width: 100%;
 }
 

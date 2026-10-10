@@ -9,7 +9,7 @@ import { dash, formatDateTime } from '@/utils/format'
 import type { CollectTask, TargetType, TaxonomyItem } from '@/types'
 
 /**
- * 分类榜单（S6.4）。
+ * 分类配置（S6.4）。
  *
  * <h3>为什么两个 Tab 共用一个表格</h3>
  * 「分类」和「榜单」的字段、操作、业务规则**完全一样**，只有 `type` 不同

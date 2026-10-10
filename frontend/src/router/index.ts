@@ -43,32 +43,44 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '图书库' },
       },
       {
+        path: 'shelf',
+        name: 'shelf',
+        component: () => import('@/views/shelf/index.vue'),
+        meta: { title: '藏书阁' },
+      },
+      {
         path: 'tasks',
         name: 'tasks',
         component: () => import('@/views/task/index.vue'),
-        meta: { title: '任务中心' },
+        meta: { title: '任务配置' },
       },
       {
         path: 'refresh',
         name: 'refresh',
         component: () => import('@/views/refresh/index.vue'),
-        meta: { title: '定时刷新' },
+        meta: { title: '增量配置' },
       },
       {
-        // 菜单里是「AI → 书籍解读」两级，但路由刻意写成**一层扁平路径**
-        // （不是 `/ai` 下再嵌 children）：分组本身没有页面，
-        // 嵌套只会多出一个没有 component 的中间层，还要配 redirect。
-        // 面包屑的「AI / 书籍解读」两段由 menu.ts 的父子关系推出来（见 AppBreadcrumb）。
-        path: 'ai/book',
-        name: 'ai-book',
-        component: () => import('@/views/ai/book/index.vue'),
-        meta: { title: '书籍解读' },
+        // 2026-10-10：原「AI → 书籍解读」二级菜单被拆成两个一级菜单，
+        // 路径跟着语义从 `/ai/book` 改成 `/publish/config` + `/publish/record`。
+        // ⚠️ 路由仍是**扁平路径**，不是 `/publish` 下再嵌 children ——
+        // 菜单里的两级结构由 menu.ts 的父子关系表达，路由不需要跟着嵌套。
+        path: 'publish/config',
+        name: 'publish-config',
+        component: () => import('@/views/publish/config/index.vue'),
+        meta: { title: '发布配置' },
+      },
+      {
+        path: 'publish/record',
+        name: 'publish-record',
+        component: () => import('@/views/publish/record/index.vue'),
+        meta: { title: '发布记录' },
       },
       {
         path: 'taxonomy',
         name: 'taxonomy',
         component: () => import('@/views/taxonomy/index.vue'),
-        meta: { title: '分类榜单' },
+        meta: { title: '分类配置' },
       },
       {
         path: 'cursors',

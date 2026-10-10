@@ -185,7 +185,7 @@ function handleSizeChange(next: number): void {
   scheduleReload()
 }
 
-/** 刷新：字典一起重拉 —— 名称可能刚在「分类榜单」页改过 */
+/** 刷新：字典一起重拉 —— 名称可能刚在「分类配置」页改过 */
 function refreshAll(): void {
   void loadDict()
   void load()
@@ -248,7 +248,7 @@ function timeClass(ms?: number | null): string {
  */
 const nameByKey = ref<Map<string, string>>(new Map())
 
-/** 字典是静态数据，进页面拉一次；在「分类榜单」页改过名之后点「刷新」会重拉 */
+/** 字典是静态数据，进页面拉一次；在「分类配置」页改过名之后点「刷新」会重拉 */
 async function loadDict(): Promise<void> {
   try {
     const [categories, rankings] = await Promise.all([

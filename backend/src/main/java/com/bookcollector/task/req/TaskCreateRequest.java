@@ -3,6 +3,7 @@ package com.bookcollector.task.req;
 import io.swagger.v3.oas.annotations.media.Schema;
 
 import javax.validation.constraints.NotBlank;
+import java.util.List;
 
 /**
  * 新建任务请求（FR-D2）。
@@ -31,6 +32,10 @@ public class TaskCreateRequest {
 
     @Schema(description = "最大页数。0 或不传 = 不限制（一直翻到 hasMore=false）", example = "10")
     private Integer maxPages;
+
+    @Schema(description = "排除分类 code 列表（如 1000007 = 个人成长-女性成长）。"
+            + "命中的图书不写库；不传或空 = 不排除任何分类")
+    private List<String> excludeCategories;
 
     @Schema(description = "备注")
     private String remark;
@@ -73,6 +78,14 @@ public class TaskCreateRequest {
 
     public void setMaxPages(Integer maxPages) {
         this.maxPages = maxPages;
+    }
+
+    public List<String> getExcludeCategories() {
+        return excludeCategories;
+    }
+
+    public void setExcludeCategories(List<String> excludeCategories) {
+        this.excludeCategories = excludeCategories;
     }
 
     public String getRemark() {

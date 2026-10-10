@@ -1,6 +1,7 @@
 package com.bookcollector.task;
 
 import com.bookcollector.collector.CollectLoop;
+import com.bookcollector.collector.CurrentMonthOnlyTargets;
 import com.bookcollector.collector.ProgressReporter;
 import com.bookcollector.collector.dto.CollectCommand;
 import com.bookcollector.collector.dto.CollectResult;
@@ -19,6 +20,10 @@ import org.slf4j.MDC;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -99,6 +104,13 @@ public class TaskRunner {
                     .targetId(task.getTargetId())
                     .targetName(task.getTargetName())
                     .maxPages(task.getMaxPages())
+                    // 排除分类（任务级黑名单）。在这一刻快照下来 ——
+                    // 运行中改任务配置不会影响本次运行（编辑接口本身也拒绝运行中编辑）。
+                    .excludeCategories(toExcludeSet(task.getExcludeCategories()))
+                    // 期刊杂志类目标只采本月（历史期号没必要采）—— 与定时刷新同口径，
+                    // 清单的单一真相在 collector.CurrentMonthOnlyTargets。
+                    .publishMonth(CurrentMonthOnlyTargets.publishMonthOrNull(
+                            TargetType.of(task.getTargetType()), task.getTargetId()))
                     // 永远从游标续传。要「从头重采」应该先重置游标（FR-E2），
                     // 而不是让任务自己决定 —— 否则「启动」这个动作的含义就变得不可预测了。
                     .resetCursor(false)
@@ -167,8 +179,12 @@ public class TaskRunner {
                 .append("，新增 ").append(result.getBooksInserted())
                 .append(" 本、更新 ")
                 .append(result.getBooksSaved() - result.getBooksInserted())
-                .append(" 本")
-                .append("，游标 ").append(result.getCurrentCursor())
+                .append(" 本");
+        // 只在真有排除时才说 —— 「排除 0 本」是噪声，还会让人以为配错了什么
+        if (result.getBooksExcluded() > 0) {
+            sb.append("、排除 ").append(result.getBooksExcluded()).append(" 本");
+        }
+        sb.append("，游标 ").append(result.getCurrentCursor())
                 .append("，耗时 ").append(result.getCostMs()).append("ms");
         if (result.getTotalCount() != null) {
             sb.append("（该目标共 ").append(result.getTotalCount()).append(" 本）");
@@ -177,6 +193,19 @@ public class TaskRunner {
             sb.append("；原因：").append(result.getErrorMsg());
         }
         return sb.toString();
+    }
+
+    /**
+     * 任务上的排除分类 → Set。
+     *
+     * <p>{@code null} / 空都返回空集：{@link CollectCommand#excludeCategoriesOrEmpty()}
+     * 只认 null，给空集是为了让「没配排除」在整条链路上只有一种表示。
+     */
+    private Set<String> toExcludeSet(List<String> codes) {
+        if (codes == null || codes.isEmpty()) {
+            return Collections.emptySet();
+        }
+        return new HashSet<String>(codes);
     }
 
     private String describeMaxPages(Integer maxPages) {

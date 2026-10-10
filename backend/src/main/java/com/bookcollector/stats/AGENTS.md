@@ -92,15 +92,15 @@ StatsController ──► StatsService(Impl) ──┬──► MongoTemplate（
 9. **🔴 二级分类的来源必须并到它的一级上，否则饼图会废。**
    `category:200003`（历史-历史读物）这类二级来源，要按 `parentCode` 把计数累加到
    `category:200000` 上。两个理由：① 不并的话同一个大类会被拆成十几个扇区；
-   ② `DISTRIBUTION_LIMIT` 只有 30，而二级有 118 个 —— **二级会把一级整个挤出榜单**，
+   ② `DISTRIBUTION_LIMIT` 只有 30，而二级有 166 个 —— **二级会把一级整个挤出榜单**，
    图上只剩二级，恰好丢掉「我采了哪几大类」这个信息。
    实现：`categoryDistribution()` + `categoryParentMap()` / `rollUpToTopCategory()`。
 
 10. **`categoryTotal` / `categoryEnabled` 只数一级分类**（`parentCode == null`）。
-    字典里现有 139 条 CATEGORY（21 一级 + 118 二级），直接 `countByType` 会让仪表盘
-    那张卡片从 21 跳到 139；而它回答的是「我采了哪几大类」。
+    字典里现有 188 条 CATEGORY（22 一级 + 166 二级），直接 `countByType` 会让仪表盘
+    那张卡片从 22 跳到 188；而它回答的是「我采了哪几大类」。
     实现：`countTopCategories()`。**二级的数量刻意不在仪表盘展示**（用户 2026-09-29 定口径），
-    要看二级清单去「分类榜单」页，要看某个二级采了多少去「任务中心」按任务看。
+    要看二级清单去「分类配置」页，要看某个二级采了多少去「任务配置」按任务看。
 
 ## 7. 依赖与耦合
 

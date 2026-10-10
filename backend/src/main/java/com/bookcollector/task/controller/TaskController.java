@@ -60,11 +60,13 @@ public class TaskController {
     }
 
     @Operation(summary = "新建任务",
-            description = "初始状态 PENDING。注意：一个目标只能有一个任务（uk_target 唯一索引）")
+            description = "初始状态 PENDING。注意：一个目标只能有一个任务（uk_target 唯一索引）。"
+                    + "excludeCategories 可选，命中的图书不写库")
     @PostMapping
     public ResultBean<CollectTask> create(@Validated @RequestBody TaskCreateRequest req) {
         return ResultBean.ok(service.create(req.getName(), req.getTargetType(), req.getTargetId(),
-                req.getTargetName(), req.getMaxPages(), req.getRemark()));
+                req.getTargetName(), req.getMaxPages(), req.getRemark(),
+                req.getExcludeCategories()));
     }
 
     @Operation(summary = "任务详情")
@@ -75,12 +77,15 @@ public class TaskController {
     }
 
     @Operation(summary = "编辑任务",
-            description = "只能改 name / maxPages / remark。目标不可改；运行中不允许编辑")
+            description = "只能改 name / maxPages / remark / excludeCategories。"
+                    + "目标不可改；运行中不允许编辑。"
+                    + "excludeCategories 传 null = 不改，传空数组 = 清空排除")
     @PutMapping("/{id}")
     public ResultBean<CollectTask> update(
             @Parameter(description = "任务 ID", required = true) @PathVariable String id,
             @Validated @RequestBody TaskUpdateRequest req) {
-        return ResultBean.ok(service.update(id, req.getName(), req.getMaxPages(), req.getRemark()));
+        return ResultBean.ok(service.update(id, req.getName(), req.getMaxPages(), req.getRemark(),
+                req.getExcludeCategories()));
     }
 
     @Operation(summary = "删除任务",

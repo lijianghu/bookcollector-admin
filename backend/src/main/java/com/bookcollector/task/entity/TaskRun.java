@@ -73,6 +73,18 @@ public class TaskRun implements Serializable {
      */
     private Long booksInserted;
 
+    /**
+     * 其中因命中任务的「排除分类」而<b>没写库</b>的图书数。
+     *
+     * <p>它<b>不</b>包含在 {@link #booksSaved} 里 —— 被排除的书压根没写。
+     * 单独记一笔是因为「采回来 20 本、只入库 13 本」在界面上看起来像丢了数据，
+     * 有这个数才能把差额解释清楚。没配排除分类的任务恒为 0。
+     *
+     * <p>数据来自 {@code collector.BookCategoryFilter} 的过滤差额，
+     * 经 {@code CollectResult.booksExcluded} 上来。
+     */
+    private Long booksExcluded;
+
     /** 当前游标值（= 下一页要用的 maxIndex） */
     private Integer currentCursor;
 

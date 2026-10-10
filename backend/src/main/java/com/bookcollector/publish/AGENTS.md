@@ -116,8 +116,10 @@ PublishScheduler ──► PublishService.currentCron() / runScheduled()
 鉴权由 `config.WebMvcConfig` 统一拦截 `/api/**` 覆盖，本模块不用声明。
 Swagger 标签：`@Tag(name = "10. AI 书籍解读")`。
 
-前端页面：`frontend/src/views/ai/book/index.vue`（路由 `/ai/book`，菜单「AI / 书籍解读」，
-**2 秒轮询** `GET /job`）；接口封装 `frontend/src/api/ai.ts`。
+前端页面：`frontend/src/views/publish/config/index.vue`（路由 `/publish/config`，菜单「发布配置」，
+**2 秒轮询** `GET /job`）；发布记录页 `frontend/src/views/publish/record/index.vue`
+（路由 `/publish/record`，菜单「发布记录」）；接口封装 `frontend/src/api/publish.ts`
+（原 `api/ai.ts`）。
 
 ## 6. 不变量与铁律 ← 改这个模块前必读
 
@@ -209,7 +211,7 @@ Swagger 标签：`@Tag(name = "10. AI 书籍解读")`。
 
 本模块**没有**单元测试（项目约定：不写单测）。手工验收：
 
-1. 重启后端 → 「AI / 书籍解读」页应显示 `cron=0 0 4 * * ?`、`enabled=false`、
+1. 重启后端 → 「发布配置」页应显示 `cron=0 0 4 * * ?`、`enabled=false`、
    分类白名单、模型配置（**只显示 name / model / baseUrl，不显示 apiKey**）
 2. 点「初始化候选」→ 立刻返回，出现进度并开始轮询；跑完清单条数应等于
    「分类白名单 ∩ 5 档评级 ∩ 评价人数 > 500」的书数
@@ -262,7 +264,7 @@ Swagger 标签：`@Tag(name = "10. AI 书籍解读")`。
 ### 9.5 后端挂掉后，页面每 2 秒弹一条「请求异常：HTTP 500」
 
 - **现象**：后端不在时，页面不停弹 500，而且停不下来。
-- **根因**：`views/ai/book/index.vue` 的 `load()` 在 catch 里什么都不做，
+- **根因**：`views/publish/config/index.vue` 的 `load()` 在 catch 里什么都不做，
   `job.value` 保留旧值 → `running` 仍是 true → `schedulePoll()` 永远排下一次。
   （500 本身是 Vite proxy 在后端不可达时回的，是症状不是病因。）
 - **修法**：⏸️ **未修**（用户 2026-10-09 说「其他非致命问题先忽略」）。
