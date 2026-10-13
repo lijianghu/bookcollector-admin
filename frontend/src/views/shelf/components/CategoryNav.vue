@@ -11,11 +11,15 @@ import type { ShelfCategory } from '@/types'
  *
  * <p>每块木牌上的数字是这一类目下的图书数量，用来回答「这个架子值不值得点进去」。
  * 数量很少的类目（个位数）不是 bug，是上游本来就只有那么多书。
+ *
+ * <p>2026-10-10：最前面多了一块**前端自建的「全部」木牌**（值 = 空串，默认选中）。
  */
 defineProps<{
   categories: ShelfCategory[]
-  /** 当前选中的一级类目名 */
+  /** 当前选中的一级类目名。**空串 = 全部** */
   active: string
+  /** 「全部」木牌上的数量 = 各类目之和（父组件算好传进来，这里不重复算一遍） */
+  allCount: number
   loading?: boolean
 }>()
 
@@ -29,6 +33,23 @@ const emit = defineEmits<{
     <el-skeleton v-if="loading && categories.length === 0" :rows="1" animated class="skeleton" />
 
     <template v-else>
+      <!--
+        「全部」是**前端自建**的一块木牌，不是后端返回的类目。
+        🔴 它的值必须是**空串**，不能写字面量 "全部" —— 空串透到后端
+        （`ShelfServiceImpl.topCategoryOf("")`）会被归一成 null = 不筛；
+        而 "全部" 会变成一个真实的类目正则前缀，恒返回 0 条，且**不报错**。
+      -->
+      <button
+        type="button"
+        class="plaque"
+        :class="{ 'is-active': active === '' }"
+        :aria-pressed="active === ''"
+        @click="emit('change', '')"
+      >
+        <span class="plaque-name">全部</span>
+        <span class="plaque-count">{{ allCount }}</span>
+      </button>
+
       <button
         v-for="item in categories"
         :key="item.name"

@@ -2,6 +2,7 @@ package com.bookcollector.shelf.repository;
 
 import com.bookcollector.shelf.entity.ShelfBook;
 import com.bookcollector.shelf.vo.ShelfCategoryVO;
+import com.bookcollector.util.RegexUtil;
 
 import org.bson.Document;
 import org.springframework.data.domain.Sort;
@@ -104,11 +105,14 @@ public class ShelfBookRepository {
      * 分页的正确性依赖排序是个全序，否则同分的书在翻页时会重复 / 漏掉。
      *
      * @param topCategory 一级类目名，如 {@code "文学"}；{@code null} = 全部
+     * @param title       书名关键词，包含匹配（模糊）；{@code null} / 空白 = 不筛
+     * @param author      作者关键词，包含匹配（模糊）；{@code null} / 空白 = 不筛
      * @param skip        跳过多少条
      * @param limit       取多少条
      */
-    public List<ShelfBook> pageBooks(String topCategory, int skip, int limit) {
-        Query query = queryOf(topCategory)
+    public List<ShelfBook> pageBooks(String topCategory, String title, String author,
+                                     int skip, int limit) {
+        Query query = queryOf(topCategory, title, author)
                 .with(Sort.by(Sort.Direction.DESC, "newRating")
                         .and(Sort.by(Sort.Direction.DESC, "newRatingCount"))
                         .and(Sort.by(Sort.Direction.DESC, "_id")))
@@ -118,15 +122,43 @@ public class ShelfBookRepository {
     }
 
     /** 与 {@link #pageBooks} 同一条件的总数 */
-    public long countBooks(String topCategory) {
-        return mongoTemplate.count(queryOf(topCategory), ShelfBook.class, COLLECTION);
+    public long countBooks(String topCategory, String title, String author) {
+        return mongoTemplate.count(queryOf(topCategory, title, author), ShelfBook.class, COLLECTION);
     }
 
-    private Query queryOf(String topCategory) {
-        if (topCategory == null || topCategory.isEmpty()) {
+    /**
+     * 把三个条件合成一个 {@code Query}：类目（前缀正则）+ 书名（包含）+ 作者（包含）。
+     *
+     * <p>用 {@code andOperator} 组合，而不是连续 {@code query.addCriteria(...)} ——
+     * 后者在同一字段上叠加条件时会被覆盖（同 {@code BookRepository.buildCriteria} 的写法）。
+     *
+     * <p>书名 / 作者走 {@link RegexUtil#contains}：**包含匹配 + 大小写不敏感**，
+     * 关键词里的正则元字符已被 {@code Pattern.quote} 转义。与图书库 / 候选清单
+     * 共用同一份转义逻辑 —— 用户输入 {@code "("} 时若没转义，正则编译会抛异常（500），
+     * 而不是「查不到」，那是更难排查的一类问题。
+     *
+     * <p>⚠️ 未锚定的正则<b>用不上索引</b> = 全集合扫描。这是用户 2026-10-12 明确要的，
+     * 藏书阁只有几千条，代价可接受；<b>不要再往其他字段上扩散</b>。
+     *
+     * <p>三个条件都为空时返回**裸 Query**，不拼一个空的 {@code $and: []}。
+     */
+    private Query queryOf(String topCategory, String title, String author) {
+        List<Criteria> conds = new ArrayList<Criteria>();
+        if (topCategory != null && !topCategory.isEmpty()) {
+            conds.add(Criteria.where("category").regex(topCategoryPattern(topCategory)));
+        }
+        Pattern titlePattern = RegexUtil.contains(title);
+        if (titlePattern != null) {
+            conds.add(Criteria.where("title").regex(titlePattern));
+        }
+        Pattern authorPattern = RegexUtil.contains(author);
+        if (authorPattern != null) {
+            conds.add(Criteria.where("author").regex(authorPattern));
+        }
+        if (conds.isEmpty()) {
             return new Query();
         }
-        return new Query(Criteria.where("category").regex(topCategoryPattern(topCategory)));
+        return new Query(new Criteria().andOperator(conds.toArray(new Criteria[0])));
     }
 
     /**

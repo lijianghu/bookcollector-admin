@@ -1,53 +1,46 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  batchDeleteInterpretations,
   clearCandidates,
   getPublishJob,
-  initCandidates,
-  pageInterpretations,
-  resetInterpretation,
   triggerPublish,
   updatePublishConfig,
 } from '@/api/publish'
-import { listTaxonomy } from '@/api/taxonomy'
-import ProTable from '@/components/ProTable.vue'
-import SearchForm from '@/components/SearchForm.vue'
 import { dash, formatDateTime, formatNumber } from '@/utils/format'
-import {
-  PUBLISH_STATUS_LABEL,
-  PUBLISH_STATUS_TAG,
-  type InterpretationVO,
-  type PublishJobVO,
-  type PublishStatus,
-  type TaxonomyItem,
-} from '@/types'
+import type { PublishJobVO } from '@/types'
 
 /**
- * 发布配置（原「AI → 书籍解读」，2026-10-10 改名并升为一级菜单）。
+ * 发布配置（原「AI → 书籍解读」，2026-10-10 改名；2026-10-12 迁入「配置」分组）。
  *
  * <h3>它做什么</h3>
  * 从候选清单里挑一本高质量图书 → 生成一篇解读文章 → 存成本地 Markdown →
  * 发布到语雀「书籍解读」目录。可以点按钮手动做一本，也可以设个时间让它自动做。
  *
- * <h3>为什么要先「初始化候选」</h3>
- * 图书库有几万条，每次现挑「符合条件且还没解读过」的书代价很大。
- * 「初始化候选」会先把符合条件的书挑出来放进一份清单，
- * 之后挑书只在这份清单里找。已有的会被跳过，所以可以反复点。
+ * <h3>🔴 2026-10-12：候选清单搬走了</h3>
+ * 原来页面下半部分是**完整候选清单**（7 个筛选 + 表格 + 批量删除 + 重置），
+ * 现在整块搬到「图书库 → 精选图书」。
+ *
+ * <p>理由：候选清单有 4800+ 条，是个**重列表页**；而本页是**轻控制台**
+ * （改 cron、点两个按钮、看进度）。挤在一起时，配置区会被表格淹掉。
+ *
+ * <p>本页保留：生成配置（cron / 启用 / 下次触发 / 候选范围 / 当前模型）、
+ * <b>候选池统计</b>（待解读 / 生成中 / 已发布 / 失败 / 总数）、
+ * 清空未解读、生成并发布，以及**跳转精选图书的入口**。
+ *
+ * <p>🔴 **2026-10-12 稍后：「初始化候选」按钮也搬走了** —— 改名「重置精选」，
+ * 放到精选图书页的**列表上方**（在哪看清单，就在哪重置清单）。
+ * 本页因此不再有触发入口，但**保留 `initRunning` 的判断**：别处正在初始化时，
+ * 本页的按钮同样要禁用、进度行照常显示 —— 用户可能点了重置再切回本页。
  *
  * <h3>🔴 两个长任务都是「提交即返回」</h3>
- * 「初始化候选」和「生成并发布」点完立刻返回，任务在后台跑。
- * 页面靠 2 秒轮询跟进：是否要继续轮询看后端的 `initRunning` / `genRunning` ——
+ * 「生成并发布」在本页触发，「重置精选」（原「初始化候选」）在精选图书页触发。
+ * 两者都是点完立刻返回、任务在后台跑，所以页面靠 2 秒轮询跟进：
+ * 是否要继续轮询看后端的 `initRunning` / `genRunning` ——
  * 它们来自后端**内存**，所以刷新页面之后也能接着看，不会卡在「执行中」。
- *
- * <h3>候选清单（2026-10-10 增强）</h3>
- * 筛选条件与图书库对齐（状态 / 书名 / 作者 / 平台分类 / 推荐值区间 /
- * 阅读人数下限 / 出版时间区间），并支持<b>勾选批量删除</b>。
- * ⚠️ 删除<b>不限状态</b> —— 已发布到语雀的也能删，删的是清单里的这一行。
- * 状态筛选的价值：进程被杀会留下「生成中」的残留记录（后端刻意不做自动清理），
- * 按状态筛出来之后点行内的「重置为待解读」就能重新排队。
  */
+const router = useRouter()
 
 // ---------------------------------------------------------------------------
 // 任务状态 + 配置
@@ -55,7 +48,6 @@ import {
 
 const loading = ref(false)
 const saving = ref(false)
-const initing = ref(false)
 const triggering = ref(false)
 const clearing = ref(false)
 const job = ref<PublishJobVO | null>(null)
@@ -86,56 +78,6 @@ const dirty = computed(
 const ready = computed(() => job.value?.modelConfigured === true && job.value?.yuqueConfigured === true)
 
 // ---------------------------------------------------------------------------
-// 候选清单：筛选 + 分页 + 勾选
-// ---------------------------------------------------------------------------
-
-const listLoading = ref(false)
-const rows = ref<InterpretationVO[]>([])
-const total = ref(0)
-const page = ref(1)
-const size = ref(20)
-const selectedRows = ref<InterpretationVO[]>([])
-const deleting = ref(false)
-
-const STATUS_OPTIONS: { label: string; value: PublishStatus | '' }[] = [
-  { label: '全部', value: '' },
-  { label: '待解读', value: 'PENDING' },
-  { label: '生成中', value: 'GENERATING' },
-  { label: '已发布', value: 'PUBLISHED' },
-  { label: '失败', value: 'FAILED' },
-]
-
-/**
- * 筛选条件，对应后端 `InterpretationQuery`。
- *
- * ⚠️ 与图书库一致：`categoryId` 传的是**一级分类**的 code。
- * 二级分类的 code 是 `subCategoryId`（另一个字段），传进来恒不匹配、
- * 静默返回 0 条 —— 所以下面的 `categoryOptions` 只列一级。
- */
-const query = reactive<{
-  status: PublishStatus | ''
-  title?: string
-  author?: string
-  categoryId?: number
-  minRating?: number
-  maxRating?: number
-  minReadingCount?: number
-  minPublishTime?: string
-  maxPublishTime?: string
-}>({
-  status: '',
-})
-
-/** 字典：只用到分类（榜单在这里没有筛选价值，所以不拉） */
-const categories = ref<TaxonomyItem[]>([])
-
-const categoryOptions = computed(() =>
-  categories.value
-    .filter((c) => !c.parentCode)
-    .map((c) => ({ value: Number(c.code), label: `${c.name}（${c.code}）` })),
-)
-
-// ---------------------------------------------------------------------------
 // 加载 + 轮询
 // ---------------------------------------------------------------------------
 
@@ -156,14 +98,8 @@ function schedulePoll(): void {
     return
   }
   pollTimer = window.setTimeout(() => {
-    void poll()
+    void load(true)
   }, POLL_MS)
-}
-
-/** 轮询一拍：任务状态 + 清单一起刷。清单也刷是因为「待解读」会变成「已发布」 */
-async function poll(): Promise<void> {
-  await load(true)
-  await loadList(true)
 }
 
 /**
@@ -190,56 +126,9 @@ async function load(silent = false): Promise<void> {
   schedulePoll()
 }
 
-/**
- * @param silent true = 轮询触发：不显示表格 loading（否则每 2 秒闪一次）
- */
-async function loadList(silent = false): Promise<void> {
-  if (!silent) {
-    listLoading.value = true
-  }
-  try {
-    const data = await pageInterpretations({
-      ...query,
-      page: page.value,
-      size: size.value,
-    })
-    rows.value = data.list
-    total.value = data.total
-
-    // 页码越界纠正：在第 3 页删光之后 page=3 会返回空列表，用户以为数据没了。
-    // 退回最后一页重来一次（只做一次，避免死循环）。同图书库的处理。
-    const lastPage = Math.max(1, data.totalPages || 1)
-    if (!correcting && data.list.length === 0 && page.value > lastPage) {
-      correcting = true
-      page.value = lastPage
-      await loadList(true)
-      correcting = false
-    }
-  } catch {
-    // 拦截器已提示
-  } finally {
-    if (!silent) {
-      listLoading.value = false
-    }
-  }
-}
-
-/** 防止「页码越界纠正」反复触发 */
-let correcting = false
-
-/** 首屏：任务状态 + 清单 + 字典 */
-async function loadAll(): Promise<void> {
-  await load()
-  await loadList()
-}
-
-async function loadDict(): Promise<void> {
-  try {
-    categories.value = await listTaxonomy('CATEGORY')
-  } catch {
-    // 字典拉不到不影响列表本身，下拉框空着即可
-    categories.value = []
-  }
+/** 跳到「精选图书」（候选清单已搬到那里） */
+function goFeatured(): void {
+  void router.push('/books/featured')
 }
 
 // ---------------------------------------------------------------------------
@@ -263,34 +152,6 @@ async function onSave(): Promise<void> {
     // 拦截器已提示（例如 cron 格式不合法）
   } finally {
     saving.value = false
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 初始化候选
-// ---------------------------------------------------------------------------
-
-async function onInit(): Promise<void> {
-  try {
-    await ElMessageBox.confirm(
-      '将按当前的分类白名单 + 评级档位 + 评价人数下限，从图书库里挑出符合条件的图书放进候选清单。' +
-        '已经在清单里的会跳过，所以可以放心重复执行。',
-      '初始化候选',
-      { type: 'warning', confirmButtonText: '开始初始化', cancelButtonText: '取消' },
-    )
-  } catch {
-    return
-  }
-  initing.value = true
-  try {
-    const data = await initCandidates()
-    job.value = data
-    ElMessage.success('已提交，正在后台执行')
-    schedulePoll()
-  } catch {
-    // 拦截器已提示
-  } finally {
-    initing.value = false
   }
 }
 
@@ -323,7 +184,7 @@ async function onTrigger(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// 清空 / 重置 / 批量删除
+// 清空未解读
 // ---------------------------------------------------------------------------
 
 async function onClear(): Promise<void> {
@@ -341,8 +202,6 @@ async function onClear(): Promise<void> {
   try {
     const data = await clearCandidates()
     job.value = data
-    page.value = 1
-    await loadList()
     ElMessage.success('已清空未解读候选')
   } catch {
     // 拦截器已提示
@@ -351,134 +210,9 @@ async function onClear(): Promise<void> {
   }
 }
 
-/**
- * 批量删除勾选的条目。
- *
- * 🔴 **不限状态**（2026-10-10 用户要求）：已发布到语雀的也能删。
- * 确认框里必须把「删的是什么」讲清楚 —— 用户很容易以为这会连带删掉语雀上的文章。
- */
-async function confirmBatchDelete(): Promise<void> {
-  const count = selectedRows.value.length
-  if (count === 0) {
-    return
-  }
-  const published = selectedRows.value.filter((r) => r.status === 'PUBLISHED').length
-  const titles = selectedRows.value
-    .slice(0, 5)
-    .map((r) => `《${r.title ?? r.bookId}》`)
-    .join('、')
-  const more = count > 5 ? ` 等 ${count} 条` : ''
-  const extra =
-    published > 0
-      ? `其中 ${published} 条已经发布到语雀 —— 删除只会去掉清单里的这一行，` +
-        `语雀上的文章和「发布记录」里的历史流水都不受影响。`
-      : ''
-  try {
-    await ElMessageBox.confirm(
-      `确定把 ${titles}${more} 从候选清单里删除吗？共 ${count} 条。${extra}`,
-      '批量删除候选',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
-    )
-  } catch {
-    return
-  }
-  deleting.value = true
-  try {
-    const result = await batchDeleteInterpretations(selectedRows.value.map((r) => r.bookId))
-    // 返回的是**实际**删除数，可能小于请求数（有的 bookId 已经不在了）
-    const missed = result.requested - result.deleted
-    ElMessage.success(
-      missed > 0
-        ? `请求删除 ${result.requested} 条，实际删除 ${result.deleted} 条（${missed} 条已不存在）`
-        : `已删除 ${result.deleted} 条`,
-    )
-    selectedRows.value = []
-    // 清单变了 → 各状态条数也变了，任务状态一起重拉
-    await load()
-    await loadList()
-  } catch {
-    // 拦截器已提示
-  } finally {
-    deleting.value = false
-  }
-}
-
-async function onReset(row: InterpretationVO): Promise<void> {
-  // 已经发布过的重跑会在语雀里**新增**一篇（旧的那篇不会删）—— 这是边界条件，必须讲出来
-  const alreadyPublished = row.status === 'PUBLISHED'
-  const extra = alreadyPublished
-    ? '⚠️ 这本书已经发布过了。重新生成会在语雀里新增一篇文档，旧的那篇不会被删除。'
-    : ''
-  try {
-    await ElMessageBox.confirm(
-      `把《${row.title ?? row.bookId}》重置为「待解读」，下次挑书时它会重新参与。${extra}`,
-      '重置为待解读',
-      { type: 'warning', confirmButtonText: '重置', cancelButtonText: '取消' },
-    )
-  } catch {
-    return
-  }
-  try {
-    await resetInterpretation(row.bookId)
-    ElMessage.success('已重置为待解读')
-    await load()
-    await loadList()
-  } catch {
-    // 拦截器已提示
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 筛选 / 分页
-// ---------------------------------------------------------------------------
-
-function handleSearch(): void {
-  page.value = 1
-  void loadList()
-}
-
-function handleReset(): void {
-  query.status = ''
-  query.title = undefined
-  query.author = undefined
-  query.categoryId = undefined
-  query.minRating = undefined
-  query.maxRating = undefined
-  query.minReadingCount = undefined
-  query.minPublishTime = undefined
-  query.maxPublishTime = undefined
-  page.value = 1
-  void loadList()
-}
-
-function onPageChange(next: number): void {
-  page.value = next
-  void loadList()
-}
-
-function onSizeChange(next: number): void {
-  size.value = next
-  // ProTable 也会 emit update:page(1)，但事件顺序不保证 —— 这里自己也算一次，
-  // 免得出现「page 还是 5、size 变成 100」这种越界请求
-  page.value = 1
-  void loadList()
-}
-
-function handleSelectionChange(list: unknown[]): void {
-  selectedRows.value = list as InterpretationVO[]
-}
-
 // ---------------------------------------------------------------------------
 // 展示辅助
 // ---------------------------------------------------------------------------
-
-function statusTag(status?: PublishStatus | null): 'success' | 'warning' | 'info' | 'primary' | 'danger' {
-  return status ? PUBLISH_STATUS_TAG[status] : 'info'
-}
-
-function statusText(status?: PublishStatus | null): string {
-  return status ? PUBLISH_STATUS_LABEL[status] : '-'
-}
 
 /** 毫秒 → 人话 */
 function formatCost(ms?: number | null): string {
@@ -488,14 +222,8 @@ function formatCost(ms?: number | null): string {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`
 }
 
-/** 推荐值 913 → 91.3% */
-function ratingText(v?: number | null): string {
-  return v === null || v === undefined ? '-' : `${(v / 10).toFixed(1)}%`
-}
-
 onMounted(() => {
-  void loadDict()
-  void loadAll()
+  void load()
 })
 onUnmounted(stopPoll)
 </script>
@@ -506,6 +234,7 @@ onUnmounted(stopPoll)
       <template #title>
         从候选清单里挑一本高质量图书，自动生成一篇解读文章，保存到本地并发布到语雀「书籍解读」目录。
         <b>一次一本书</b>：可以点「生成并发布」手动做，也可以设定时间让它自动做。
+        候选清单的明细（筛选 / 批量删除 / 重置）在「精选图书」里。
       </template>
     </el-alert>
 
@@ -530,7 +259,7 @@ onUnmounted(stopPoll)
           </el-tag>
           <el-tag v-else-if="initRunning" type="primary" effect="dark" size="small">
             <el-icon class="spin"><Loading /></el-icon>
-            初始化中
+            重置中
           </el-tag>
         </div>
       </template>
@@ -604,7 +333,7 @@ onUnmounted(stopPoll)
           <el-button type="primary" :loading="saving" :disabled="running" @click="onSave">
             保存配置
           </el-button>
-          <el-button :loading="loading" @click="loadAll()">
+          <el-button :loading="loading" @click="load()">
             <el-icon><Refresh /></el-icon>
             {{ running ? '刷新进度' : '刷新' }}
           </el-button>
@@ -624,16 +353,6 @@ onUnmounted(stopPoll)
 
       <div class="actions">
         <el-button
-          type="primary"
-          plain
-          :loading="initing"
-          :disabled="running"
-          @click="onInit"
-        >
-          <el-icon><FolderAdd /></el-icon>
-          初始化候选
-        </el-button>
-        <el-button
           type="success"
           :loading="triggering"
           :disabled="running"
@@ -651,12 +370,17 @@ onUnmounted(stopPoll)
         >
           清空未解读
         </el-button>
+        <!-- 候选清单明细（含「重置精选」按钮）已搬到「精选图书」，这里给个直达入口 -->
+        <el-button @click="goFeatured">
+          <el-icon><Medal /></el-icon>
+          查看精选图书
+        </el-button>
       </div>
 
-      <!-- 初始化进度 -->
+      <!-- 重置精选的进度：本页已无触发入口，但别处（精选图书页）触发时这里照常显示 -->
       <div v-if="initRunning" class="progress-line">
         <el-icon class="spin"><Loading /></el-icon>
-        正在初始化候选：已扫描 <b>{{ formatNumber(job?.initScanned) }}</b> 本，
+        正在重置精选：已扫描 <b>{{ formatNumber(job?.initScanned) }}</b> 本，
         新增 <b>{{ formatNumber(job?.initInserted) }}</b> 条，
         跳过 <b>{{ formatNumber(job?.initSkipped) }}</b> 条
       </div>
@@ -690,203 +414,11 @@ onUnmounted(stopPoll)
           <span class="num">{{ formatNumber(job.totalCount) }}</span>
         </el-descriptions-item>
       </el-descriptions>
-    </el-card>
 
-    <!-- ============ 候选清单筛选 ============ -->
-    <SearchForm
-      :model="query"
-      :loading="listLoading"
-      :columns="4"
-      label-width="100px"
-      @search="handleSearch"
-      @reset="handleReset"
-    >
-      <el-form-item label="状态">
-        <el-select v-model="query.status" clearable placeholder="全部">
-          <el-option
-            v-for="o in STATUS_OPTIONS"
-            :key="o.value"
-            :label="o.label"
-            :value="o.value"
-          />
-        </el-select>
-      </el-form-item>
-
-      <el-form-item label="书名">
-        <el-input v-model="query.title" clearable placeholder="模糊搜索，含即可" />
-      </el-form-item>
-
-      <el-form-item label="作者">
-        <el-input v-model="query.author" clearable placeholder="模糊搜索，含即可" />
-      </el-form-item>
-
-      <el-form-item label="平台分类">
-        <el-select v-model="query.categoryId" clearable filterable placeholder="全部">
-          <el-option
-            v-for="opt in categoryOptions"
-            :key="opt.value"
-            :label="opt.label"
-            :value="opt.value"
-          />
-        </el-select>
-      </el-form-item>
-
-      <el-form-item label="推荐值区间">
-        <div class="range">
-          <el-input-number
-            v-model="query.minRating"
-            :min="0"
-            :max="1000"
-            :controls="false"
-            placeholder="下限"
-          />
-          <span class="range-sep">~</span>
-          <el-input-number
-            v-model="query.maxRating"
-            :min="0"
-            :max="1000"
-            :controls="false"
-            placeholder="上限"
-          />
-        </div>
-      </el-form-item>
-
-      <el-form-item label="阅读人数">
-        <el-input-number
-          v-model="query.minReadingCount"
-          :min="0"
-          :controls="false"
-          placeholder="下限，不限则空"
-        />
-      </el-form-item>
-
-      <el-form-item label="出版时间从">
-        <el-input v-model="query.minPublishTime" clearable placeholder="2015 / 2015-06" />
-      </el-form-item>
-
-      <el-form-item label="出版时间到">
-        <el-input v-model="query.maxPublishTime" clearable placeholder="2023 / 2023-12" />
-      </el-form-item>
-
-      <div class="query-hint">
-        筛选条件与「图书库」一致（状态 / 书名 / 作者 / 平台分类 / 推荐值区间 /
-        阅读人数下限 / 出版时间区间），条件之间是「与」的关系。书名与作者是<b>模糊搜索</b>。
-        勾选后可批量删除，<b>不限状态</b> —— 已发布到语雀的也能删。
+      <div class="hint summary-hint">
+        清单明细（筛选 / 批量删除 / 重置为待解读）在
+        <el-link type="primary" :underline="false" @click="goFeatured">精选图书</el-link>。
       </div>
-    </SearchForm>
-
-    <!-- ============ 候选清单 ============ -->
-    <el-card shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span class="card-title">候选清单</span>
-          <span class="hint">共 {{ total }} 条</span>
-        </div>
-      </template>
-
-      <ProTable
-        :data="rows"
-        :loading="listLoading"
-        :total="total"
-        :page="page"
-        :size="size"
-        :page-sizes="[20, 50, 100]"
-        row-key="bookId"
-        selectable
-        empty-text="清单还是空的（或没有符合筛选条件的条目）。点上面的「初始化候选」把符合条件的图书挑进来。"
-        @update:page="onPageChange"
-        @update:size="onSizeChange"
-        @selection-change="handleSelectionChange"
-      >
-        <template #toolbar>
-          <el-button
-            v-if="selectedRows.length > 0"
-            type="danger"
-            :loading="deleting"
-            @click="confirmBatchDelete"
-          >
-            <el-icon><Delete /></el-icon>
-            批量删除（{{ selectedRows.length }}）
-          </el-button>
-          <span class="toolbar-info">
-            共 {{ formatNumber(total) }} 条 · 本页 {{ rows.length }} 条
-          </span>
-        </template>
-
-        <el-table-column label="书名" min-width="200" show-overflow-tooltip>
-          <template #default="{ row }">
-            <div class="book-title">{{ row.title ?? dash(row.bookId) }}</div>
-            <div class="book-author">{{ dash(row.author) }}</div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="分类" width="140" show-overflow-tooltip>
-          <template #default="{ row }">{{ dash(row.category) }}</template>
-        </el-table-column>
-
-        <el-table-column label="推荐值" width="84" align="right">
-          <template #default="{ row }">{{ ratingText(row.newRating) }}</template>
-        </el-table-column>
-
-        <el-table-column label="评价人数" width="96" align="right">
-          <template #default="{ row }">
-            <span class="num">{{ formatNumber(row.newRatingCount) }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="状态" width="88" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="statusTag(row.status)" effect="dark">
-              {{ row.statusLabel ?? statusText(row.status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="语雀" width="76" align="center">
-          <template #default="{ row }">
-            <el-link
-              v-if="row.yuqueUrl"
-              type="primary"
-              :href="row.yuqueUrl"
-              target="_blank"
-              :underline="false"
-            >
-              打开
-            </el-link>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="合规替换" width="92" align="center">
-          <template #default="{ row }">
-            <span v-if="row.sensitiveHitCount" class="num">{{ row.sensitiveHitCount }} 词</span>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="失败原因" min-width="180" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span v-if="row.errorMsg" class="error-msg">{{ row.errorMsg }}</span>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="完成时间" width="150">
-          <template #default="{ row }">{{ formatDateTime(row.finishedAt) }}</template>
-        </el-table-column>
-
-        <el-table-column label="操作" width="110" align="center" fixed="right">
-          <template #default="{ row }">
-            <el-button
-              size="small"
-              :disabled="running"
-              @click="onReset(row)"
-            >
-              重置为待解读
-            </el-button>
-          </template>
-        </el-table-column>
-      </ProTable>
     </el-card>
   </div>
 </template>
@@ -988,43 +520,8 @@ onUnmounted(stopPoll)
   margin-top: 4px;
 }
 
-/* 区间输入：两个数字框 + 中间的波浪号 */
-.range {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-}
-.range :deep(.el-input-number) {
-  flex: 1;
-  min-width: 0;
-}
-.range-sep {
-  color: #909399;
-  flex-shrink: 0;
-}
-
-.query-hint {
-  grid-column: 1 / -1;
-  margin: -8px 0 8px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: #909399;
-}
-
-.toolbar-info {
-  margin-left: auto;
-  font-size: 12px;
-  color: #909399;
-}
-
-.book-title {
-  font-weight: 600;
-}
-
-.book-author {
-  font-size: 12px;
-  color: #909399;
+.summary-hint {
+  margin-top: 10px;
 }
 
 .num {
@@ -1035,10 +532,6 @@ onUnmounted(stopPoll)
   color: #67c23a;
 }
 .danger {
-  color: #f56c6c;
-}
-
-.error-msg {
   color: #f56c6c;
 }
 

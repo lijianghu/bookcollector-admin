@@ -31,15 +31,33 @@ export function listShelfCategories() {
  * 主序沿用旧版书架「评分最高先看」；后两级只为**确定性** ——
  * 分页的正确性依赖排序是个全序，否则同分的书在翻页时会重复/漏。
  *
- * @param category 一级类目名，如「文学」；传空 = 取全部。传带二级的完整名也能用（后端截到一级）
- * @param page     页码，从 1 开始
- * @param size     每页条数，默认 30（一屏 10 列 × 3 行）
+ * <h3>2026-10-12：加了书名 / 作者模糊搜索，参数收成一个对象</h3>
+ * 参数从 3 个涨到 5 个，其中 3 个是字符串 —— 位置参数太容易传错，所以改成具名对象。
+ * 空串 / `undefined` 由请求层统一跳过（等价于「不筛这一项」）。
+ *
+ * @param params.category 一级类目名，如「文学」；空 = 取全部。传带二级的完整名也能用（后端截到一级）
+ * @param params.title    书名关键词，**包含匹配**（模糊，大小写不敏感）；空 = 不筛
+ * @param params.author   作者关键词，**包含匹配**（模糊，大小写不敏感）；空 = 不筛
+ * @param params.page     页码，从 1 开始
+ * @param params.size     每页条数（藏书阁一屏 8 列 × 3 行 = 24 条；不传则后端兜底 30）
  */
-export function pageShelfBooks(category: string, page = 1, size = 30) {
+export function pageShelfBooks(params: {
+  category?: string
+  title?: string
+  author?: string
+  page?: number
+  size?: number
+}) {
   return request<PageResult<ShelfBook>>({
     url: '/shelf/books',
     method: 'get',
-    params: { category, page, size },
+    params: {
+      category: params.category ?? '',
+      title: params.title ?? '',
+      author: params.author ?? '',
+      page: params.page ?? 1,
+      size: params.size ?? 30,
+    },
   })
 }
 

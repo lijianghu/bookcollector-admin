@@ -243,12 +243,33 @@ export interface Book {
   collectSource?: string[] | null
 }
 
-/** 图书列表查询条件，对应后端 BookQuery 的 16 个参数 */
+/** 图书列表查询条件，对应后端 BookQuery 的 17 个参数 */
 export interface BookQuery {
+  /** 一级分类 ID（后端匹配 `categories[].categoryId`）。级联框选一级时发这个 */
   categoryId?: number
+  /**
+   * 二级分类 ID（后端匹配 `categories[].subCategoryId`）。2026-10-12 新增。
+   *
+   * ⚠️ 与 `categoryId` 是 `categories[]` 里的**两个不同的键** —— 一级走 `categoryId`、
+   * 二级走 `subCategoryId`。把二级 code 当 `categoryId` 传会**恒不匹配、静默返回 0 条**。
+   * 级联框选到二级时**只**发本字段（不再同时发 `categoryId`）。
+   */
+  subCategoryId?: number
   minRating?: number
   maxRating?: number
   minReadingCount?: number
+  /**
+   * 评价标题（`newRatingTitle`），**精确匹配**。2026-10-12 新增。
+   *
+   * 取值是微信读书给的档位文案（`神作` / `好评如潮` / `评分不足` …），
+   * 候选清单在 `views/book/index.vue` 的 `RATING_TITLE_OPTIONS`（**写死**，刻意不加接口）。
+   *
+   * ⚠️ 与 `minRating` / `maxRating` 是两回事：那两个筛**数值**（`newRating` 0~1000），
+   * 这个筛**档位文案**。
+   * ⚠️ 传 `__NONE__` 表示「暂无评级」—— 库里 46% 的书没有这个字段，
+   * 后端把它拼成「该字段为 null 或不存在」。
+   */
+  newRatingTitle?: string
   targetType?: TargetType | ''
   targetId?: string
   /** 书名关键词，包含匹配（模糊搜索） */
@@ -772,7 +793,7 @@ export interface PublishJobVO {
   yuqueConfigured: boolean
 
   // ---- 内存态：页面靠它们决定要不要继续轮询 ----
-  /** 「初始化候选」是否正在执行 */
+  /** 「重置精选」（原「初始化候选」，入口在「精选图书」页）是否正在执行 */
   initRunning: boolean
   /** 「生成并发布」是否正在执行 */
   genRunning: boolean
@@ -934,4 +955,74 @@ export interface ShelfBook {
 export interface ShelfCategory {
   name: string
   count: number
+}
+
+/** ==================================================================
+ * 阅读清单（13. 阅读清单）
+ * ================================================================== */
+
+/**
+ * 阅读状态。三态。
+ *
+ * <h3>与 `PublishStatus` 毫无关系</h3>
+ * 那个是 AI 解读在流水线上的位置（待解读 / 生成中 / 已发布 / 失败），
+ * 这个**人的阅读进度**（想读 / 在读 / 已读）。名字都带 status，但语义、
+ * 生命周期、归属模块完全不同 —— 不要互相复用。
+ */
+export type ReadingStatus = 'WANT_TO_READ' | 'READING' | 'FINISHED'
+
+export const READING_STATUS_LABEL: Record<ReadingStatus, string> = {
+  WANT_TO_READ: '想读',
+  READING: '在读',
+  FINISHED: '已读',
+}
+
+export const READING_STATUS_TAG: Record<ReadingStatus, TagType> = {
+  WANT_TO_READ: 'info',
+  READING: 'primary',
+  FINISHED: 'success',
+}
+
+/**
+ * 阅读清单里的一本书（快照）。
+ *
+ * <h3>数据源</h3>
+ * 后端集合 `reading_list`。字段是**加入阅读清单那一刻**的快照 ——
+ * 图书库里的记录后来被改过或被删过，都不影响这里。
+ *
+ * <h3>与「我的藏书」(`ShelfBook`) 是两个维度</h3>
+ * 收藏 ≠ 想读，两者不可互相推导，也不可互相影响（移除一个不影响另一个）。
+ */
+export interface ReadingListItem {
+  bookId: string
+  title?: string | null
+  author?: string | null
+  cover?: string | null
+  /** 平台分类，如 文学-经典作品 */
+  category?: string | null
+  /** 推荐值 0~1000 */
+  newRating?: number | null
+  newRatingCount?: number | null
+  readingCount?: number | null
+  intro?: string | null
+  status?: ReadingStatus | null
+  /** 状态的中文文案，后端已给，前端不用再维护一份映射 */
+  statusLabel?: string | null
+  /** 状态最后变更时间（UTC ISO-8601，格式化必须过 `new Date()`） */
+  statusUpdatedAt?: string | null
+}
+
+/** 批量查阅读清单状态的返回项。只含**已在清单里**的书 */
+export interface ReadingListStatusItem {
+  bookId: string
+  status: ReadingStatus
+}
+
+/** 各状态计数（给状态 Tab 的角标） */
+export interface ReadingListSummary {
+  wantToRead: number
+  reading: number
+  finished: number
+  /** 总数。以库为准，不一定等于前三项之和（万一混进非法状态） */
+  total: number
 }

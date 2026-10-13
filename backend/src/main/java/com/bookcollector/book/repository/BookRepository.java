@@ -245,6 +245,12 @@ public class BookRepository {
         if (q.getCategoryId() != null) {
             conds.add(Criteria.where("categories.categoryId").is(q.getCategoryId()));
         }
+        // 二级分类（2026-10-12 新增）：与上面 categoryId 是 categories[] 里的**两个不同的键**。
+        // 前端级联框选一级时只发 categoryId、选到二级时只发 subCategoryId，两者不会同时非空。
+        // ⚠️ 别把它并到上面那条里 —— 那样二级 code 会恒不匹配、静默返回 0 条。
+        if (q.getSubCategoryId() != null) {
+            conds.add(Criteria.where("categories.subCategoryId").is(q.getSubCategoryId()));
+        }
         if (q.getMinRating() != null) {
             // ★ 路径是顶层 newRating（推荐值 0~1000）。
             // 这里原来写成 newRatingDetail.newRating —— 那个字段不存在，
@@ -256,6 +262,21 @@ public class BookRepository {
         }
         if (q.getMinReadingCount() != null) {
             conds.add(Criteria.where("readingCount").gte(q.getMinReadingCount()));
+        }
+        // 评价标题（2026-10-12 新增）：按**档位文案**精确筛，与上面 minRating / maxRating
+        // 的**数值**区间是两回事（那两个筛 newRating 0~1000，这个筛 newRatingTitle）。
+        String ratingTitle = q.resolveNewRatingTitle();
+        if (ratingTitle != null) {
+            if (BookQuery.TITLE_NONE.equals(ratingTitle)) {
+                // 「暂无评级」。🔴 MongoDB 里 `{field: null}` **同时**匹配「值是 null」
+                // 和「整个字段不存在」两种形态，所以这一条就够了，不需要再 or 一个 $exists:false。
+                // （同一个 idiom 见 `StatsServiceImpl.countTopCategories` 的 `{parentCode: null}`。
+                //   2026-10-12 实测：`{newRatingTitle: null}` 与
+                //   `$or:[null, {$exists:false}]` 命中的是**同一批 23678 本**。）
+                conds.add(Criteria.where("newRatingTitle").is(null));
+            } else {
+                conds.add(Criteria.where("newRatingTitle").is(ratingTitle));
+            }
         }
         String title = q.resolveTitle();
         if (title != null) {

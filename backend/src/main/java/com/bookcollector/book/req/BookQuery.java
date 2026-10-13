@@ -42,8 +42,35 @@ public class BookQuery {
     /** 默认每页条数 */
     public static final int DEFAULT_SIZE = 20;
 
+    /**
+     * {@link #newRatingTitle} 的「暂无评级」哨兵值（2026-10-12）。
+     *
+     * <p>库里 46%（23678 / 51365）的书<b>没有</b> {@code newRatingTitle}。前端下拉框里
+     * 「暂无评级」那一项就发这个值，后端据此拼「该字段为 null 或整个字段不存在」的条件。
+     *
+     * <p>为什么不复用空串：本项目约定<b>空串 = 不筛这一项</b>（见 {@code blankToNull}），
+     * 用空串就表达不了「专门找没有评价标题的书」。所以取一个不可能与真实档位撞车的值 ——
+     * 微信读书的档位都是中文词，不会出现下划线。
+     */
+    public static final String TITLE_NONE = "__NONE__";
+
     /** 按平台分类 ID 精确筛（匹配 categories.categoryId，不是字符串前缀匹配） */
     private Integer categoryId;
+
+    /**
+     * 按<b>二级分类 ID</b>精确筛（匹配 {@code categories.subCategoryId}）。2026-10-12 新增。
+     *
+     * <p>为什么要单开一个字段、而不复用 {@link #categoryId}：一级分类在库里是
+     * {@code categories[].categoryId}，二级分类是 {@code categories[].subCategoryId}
+     * —— <b>两个不同的键</b>。把二级的 code 当 {@code categoryId} 传进来，条件恒不匹配、
+     * <b>静默返回 0 条</b>（不报错），用户只会以为「这个分类没数据」，
+     * 是最难排查的那类问题。所以前端「平台分类」级联框选到二级时，发的是这个字段。
+     *
+     * <p>⚠️ 两者<b>不会同时非空</b>：选一级只发 {@link #categoryId}，选到二级只发本字段。
+     * 之所以不「二级 + 它的一级」一起发 —— 二级的 code 天然蕴含它的一级父分类，
+     * 多 AND 一个 {@code categoryId} 不增加任何筛选力，只是白多一个条件。
+     */
+    private Integer subCategoryId;
 
     /** 评分下限（含）。★ 路径是<b>顶层</b> {@code newRating}，见 {@link #resolveSortPath()} 的说明 */
     private Integer minRating;
@@ -53,6 +80,17 @@ public class BookQuery {
 
     /** 阅读人数下限（含） */
     private Integer minReadingCount;
+
+    /**
+     * 按<b>评价标题</b>精确筛（顶层 {@code newRatingTitle}）。2026-10-12 新增。
+     *
+     * <p>取值是微信读书给的<b>档位文案</b>，形如 {@code "神作"} / {@code "好评如潮"} /
+     * {@code "评分不足"}。🔴 与 {@link #minRating} / {@link #maxRating} 是<b>两回事</b>：
+     * 那两个筛的是<b>数值</b>（{@code newRating} 0~1000），这个筛的是<b>档位文案</b>。
+     *
+     * <p>⚠️ 传 {@link #TITLE_NONE} 表示「<b>暂无评级</b>」—— 库里 46% 的书没有这个字段。
+     */
+    private String newRatingTitle;
 
     /** 按采集来源筛：CATEGORY / RANKING */
     private String targetType;
@@ -198,6 +236,17 @@ public class BookQuery {
         return blankToNull(author);
     }
 
+    /**
+     * 评价标题。空白串归一成 null（= 不筛这一项）。
+     *
+     * <p>⚠️ 返回值<b>可能</b>是哨兵 {@link #TITLE_NONE} —— 它<b>不是</b>「不筛」，而是
+     * 「筛没有这个字段的书」，由调用方（{@code BookRepository.buildCriteria}）特判。
+     * 之所以不在这里把哨兵吞成 null：那样调用方就再也分不清「不筛」和「筛暂无评级」了。
+     */
+    public String resolveNewRatingTitle() {
+        return blankToNull(newRatingTitle);
+    }
+
     /** 出版时间下限。空白串归一成 null */
     public String resolveMinPublishTime() {
         return blankToNull(minPublishTime);
@@ -299,6 +348,14 @@ public class BookQuery {
         this.categoryId = categoryId;
     }
 
+    public Integer getSubCategoryId() {
+        return subCategoryId;
+    }
+
+    public void setSubCategoryId(Integer subCategoryId) {
+        this.subCategoryId = subCategoryId;
+    }
+
     public Integer getMinRating() {
         return minRating;
     }
@@ -321,6 +378,14 @@ public class BookQuery {
 
     public void setMinReadingCount(Integer minReadingCount) {
         this.minReadingCount = minReadingCount;
+    }
+
+    public String getNewRatingTitle() {
+        return newRatingTitle;
+    }
+
+    public void setNewRatingTitle(String newRatingTitle) {
+        this.newRatingTitle = newRatingTitle;
     }
 
     public String getTargetType() {

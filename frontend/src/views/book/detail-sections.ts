@@ -37,6 +37,16 @@ function categoryTitles(book: Book): string[] {
     .filter((t): t is string => typeof t === 'string' && t !== '')
 }
 
+/**
+ * 推荐值 0~1000 → 百分比文案。`913` → `"91.3%"`。
+ *
+ * <p>与列表列、「发布配置」、「发布记录」、「藏书阁抽屉」同一口径。
+ * ⚠️ 只改**展示** —— `BookQuery.minRating / maxRating` 仍是 0~1000 的量纲。
+ */
+function ratingText(v?: number | null): string {
+  return v === null || v === undefined ? '-' : `${(v / 10).toFixed(1)}%`
+}
+
 export function buildBookDetailSections(book: Book): DetailSection[] {
   return [
     {
@@ -61,7 +71,7 @@ export function buildBookDetailSections(book: Book): DetailSection[] {
       title: '评分与热度',
       items: [
         // 🔴 顶层 newRating，不是 newRatingDetail.newRating（后者不存在）
-        { label: '推荐值', value: book.newRating },
+        { label: '推荐值', value: ratingText(book.newRating) },
         { label: '评价人数', value: book.newRatingCount },
         { label: '评价标题', value: book.newRatingTitle },
         { label: '阅读人数', value: book.readingCount },

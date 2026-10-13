@@ -31,7 +31,13 @@ public class ShelfServiceImpl implements ShelfService {
 
     private static final Logger log = LoggerFactory.getLogger(ShelfServiceImpl.class);
 
-    /** 默认每页 30 条 —— 前端一屏是 10 列 × 3 行 */
+    /**
+     * 默认每页 30 条 —— 前端不传 {@code size} 时的兜底值。
+     *
+     * <p>前端藏书阁实际一屏是 <b>8 列 × 3 行 = 24 条</b>（2026-10-10 由 10 列改成 8 列），
+     * 且一定会显式传 {@code size}，所以这里<b>刻意不跟前端列数同步</b>：它只在
+     * 「忘了传 size」时兜底，取个略大的值避免一次拉得太少。改前端列数不必回来动它。
+     */
     private static final int DEFAULT_SIZE = 30;
 
     /** 上限。防 {@code size=99999} 把整表拉回来 */
@@ -49,14 +55,18 @@ public class ShelfServiceImpl implements ShelfService {
     }
 
     @Override
-    public PageResult<ShelfBookVO> pageBooks(String category, Integer page, Integer size) {
+    public PageResult<ShelfBookVO> pageBooks(String category, String title, String author,
+                                             Integer page, Integer size) {
         String top = topCategoryOf(category);
         int p = normalizePage(page);
         int s = normalizeSize(size);
         int skip = (p - 1) * s;
 
-        long total = repository.countBooks(top);
-        List<ShelfBook> rows = repository.pageBooks(top, skip, s);
+        // title / author 刻意**不在这里归一化**：`RegexUtil.contains()` 自己会 trim，
+        // 空白串返回 null = 不筛这一项。（不能拼一个空正则 —— 空正则会匹配所有文档，
+        // 看起来「筛了」，实际等于没筛，属于静默失效。）
+        long total = repository.countBooks(top, title, author);
+        List<ShelfBook> rows = repository.pageBooks(top, title, author, skip, s);
 
         List<ShelfBookVO> list = new ArrayList<ShelfBookVO>(rows.size());
         for (ShelfBook row : rows) {

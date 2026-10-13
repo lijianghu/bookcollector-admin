@@ -71,8 +71,10 @@ public final class RefreshTarget {
      * <p>⚠️ 榜单的 {@code code} 必须与 {@code SeedRunner.RANKINGS} 逐字一致 ——
      * 它们会被原样拼进 URL（{@code /bookListInCategory/{code}?rank=1}）。
      *
-     * <p>「期刊杂志」这一个目标还额外「只采本月」（见
-     * {@code collector.CurrentMonthOnlyTargets}）—— 它按期上新，历史期号没必要采。
+     * <p>「期刊杂志」这一个目标还额外「只采本月」—— 它按期上新，历史期号没必要采。
+     * 这条过滤<b>不在这里实现</b>：它按书自己判定（{@code categories[0].categoryId
+     * == 1700000}），在 {@code collector.CollectLoop#keepJournalCurrentMonth} 里生效，
+     * 与采集目标无关（所以榜单里混进的期刊同样会被挡掉）。
      */
     public static final List<RefreshTarget> ALL = Collections.unmodifiableList(Arrays.asList(
             new RefreshTarget(TargetType.RANKING, "rising", "飙升榜"),

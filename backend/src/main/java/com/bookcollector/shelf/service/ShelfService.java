@@ -26,10 +26,15 @@ public interface ShelfService {
      *
      * @param category 一级类目名。{@code null} / 空 = 不筛，取全部。
      *                 也接受带二级的完整名（{@code "文学-经典作品"}），内部会截到一级
+     * @param title    书名关键词。<b>包含匹配</b>（模糊搜索，大小写不敏感）。
+     *                 {@code null} / 空白 = 不筛这一项
+     * @param author   作者关键词。<b>包含匹配</b>（模糊搜索，大小写不敏感）。
+     *                 {@code null} / 空白 = 不筛这一项
      * @param page     页码，从 1 开始
      * @param size     每页条数。{@code null} / {@code < 1} 用默认值，超过上限会被夹住
      */
-    PageResult<ShelfBookVO> pageBooks(String category, Integer page, Integer size);
+    PageResult<ShelfBookVO> pageBooks(String category, String title, String author,
+                                      Integer page, Integer size);
 
     /**
      * 把一本书加进藏书阁（从 {@code books} 取快照）。

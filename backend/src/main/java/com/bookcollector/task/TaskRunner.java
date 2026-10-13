@@ -1,7 +1,6 @@
 package com.bookcollector.task;
 
 import com.bookcollector.collector.CollectLoop;
-import com.bookcollector.collector.CurrentMonthOnlyTargets;
 import com.bookcollector.collector.ProgressReporter;
 import com.bookcollector.collector.dto.CollectCommand;
 import com.bookcollector.collector.dto.CollectResult;
@@ -107,10 +106,8 @@ public class TaskRunner {
                     // 排除分类（任务级黑名单）。在这一刻快照下来 ——
                     // 运行中改任务配置不会影响本次运行（编辑接口本身也拒绝运行中编辑）。
                     .excludeCategories(toExcludeSet(task.getExcludeCategories()))
-                    // 期刊杂志类目标只采本月（历史期号没必要采）—— 与定时刷新同口径，
-                    // 清单的单一真相在 collector.CurrentMonthOnlyTargets。
-                    .publishMonth(CurrentMonthOnlyTargets.publishMonthOrNull(
-                            TargetType.of(task.getTargetType()), task.getTargetId()))
+                    // 期刊杂志「只采本月」不在这里配置：它按书自己判
+                    // （categories[0].categoryId == 1700000），在 CollectLoop 里生效。
                     // 永远从游标续传。要「从头重采」应该先重置游标（FR-E2），
                     // 而不是让任务自己决定 —— 否则「启动」这个动作的含义就变得不可预测了。
                     .resetCursor(false)

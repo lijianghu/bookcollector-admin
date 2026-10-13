@@ -2,12 +2,13 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { batchDeleteBooks, deleteBook, getBook, pageBooks } from '@/api/book'
-import { addToShelf, fetchShelfStatus, removeFromShelf } from '@/api/shelf'
 import { listTaxonomy } from '@/api/taxonomy'
 import ProTable from '@/components/ProTable.vue'
 import SearchForm from '@/components/SearchForm.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
+import BookActionMenu from '@/components/BookActionMenu.vue'
 import { useColumnPrefs, type ColumnPref } from '@/composables/useColumnPrefs'
+import { useBookActions } from '@/composables/useBookActions'
 import { buildBookDetailSections, countDetailItems } from './detail-sections'
 import BookEditDialog from './BookEditDialog.vue'
 import { dash, formatDate, formatNumber, formatPublishDate } from '@/utils/format'
@@ -48,8 +49,12 @@ import type { Book, BookQuery, BookSortField, TaxonomyItem } from '@/types'
  * 用户不会知道右边还有列，只会觉得「采集来源那一列怎么没了」。
  *
  * 所以这里把「最近采集」「采集来源」设成默认不显示，并把其余列收紧到
- * 总和 ≈ 1118px，留出余量。想要更多列就去「列配置」里打开 ——
+ * 总和 ≈ **1142px**，留出余量。想要更多列就去「列配置」里打开 ——
  * 那时用户知道自己在做什么，也愿意横向滚。
+ *
+ * <p>2026-10-10 重新分配过一次：**「平台分类」150 → 176**（要放 category
+ * 加上 `categories[].title` 的全部标签，窄了会把标签挤成两行以上），
+ * 腾出的宽度来自 **「推荐值」88 → 78**（它改成百分比之后 `91.3%` 比 `913` 还短）。
  *
  * 这条约定有验收守着：`tools/s6-acceptance.mjs` 里断言
  * 「默认列下表格不出现横向滚动」+「表头没有一列换行」。
@@ -90,11 +95,45 @@ const sortField = ref<BookSortField>('newRating')
 const sortAsc = ref(false)
 
 /**
- * 查询条件。与 `BookQuery` 的 16 个参数一一对应。
+ * 表头排序箭头的数据源。
  *
- * `categoryId` 是**数字**（后端按 `categories.categoryId` 精确匹配），
- * 而 `targetId` 是**字符串**（分类的 code 是 "300000"，榜单的 code 是 "rising"）。
- * 两个字段类型不一样，是后端的实际契约，不是笔误。
+ * <h3>🔴 为什么程序化改排序时必须「换 key 重建表格」</h3>
+ * `el-table` **只在挂载时读一次** `default-sort`（Element Plus 2.14.6
+ * `components/table/src/table-header/index.mjs` 的 `onMounted` 里执行
+ * `store.commit('sort', {... init: true})`），之后改这个 prop **不会更新箭头**。
+ * 于是「选期刊杂志 → 自动切出版时间倒序」这种程序化改排序，如果只改 `sortField`，
+ * 表头箭头会指着「推荐值」而数据实际按「出版时间」排 —— 两边打架。
+ * 解法见 `applySortForCategory()`：换 `tableKey` 让 ProTable 重建，箭头跟着重算。
+ *
+ * <p>带 `init: true` 的那次 commit **不会 emit `sort-change`**（实测 `store/index.mjs`
+ * 的 `changeSortCondition` 里有 `options.init` 短路），所以重建**不会**绕回来触发
+ * `handleSortChange` —— 既不会多打一次接口，也不会死循环。
+ */
+const defaultSort = computed<{ prop: string; order: 'ascending' | 'descending' }>(() => ({
+  prop: sortField.value,
+  order: sortAsc.value ? 'ascending' : 'descending',
+}))
+
+/**
+ * ProTable 的 `:key`。**唯一用途**是「程序化改了排序时强制重建表格」，
+ * 让表头箭头跟上实际排序（原因见 `defaultSort`）。
+ *
+ * ⚠️ 只在**分类联动真的改了排序**时 +1（见 `applySortForCategory`）；
+ * 用户点表头改排序**不换 key** —— 那种情况 el-table 自己管箭头，重建反而会打架。
+ * 重建会让 el-table 的内部选中态清空，所以联动里顺手把 `selectedRows` 也清掉，
+ * 免得「批量删除」按钮拿着一批界面上根本没勾选的行。
+ */
+const tableKey = ref(0)
+
+/**
+ * 查询条件。与 `BookQuery` 的 18 个参数一一对应。
+ *
+ * `categoryId` / `subCategoryId` 是**数字**（后端分别精确匹配 `categories.categoryId` /
+ * `categories.subCategoryId`），而 `targetId` 是**字符串**（分类的 code 是 "300000"，
+ * 榜单的 code 是 "rising"）。类型不一样是后端的实际契约，不是笔误。
+ *
+ * ⚠️ `categoryId`（一级）与 `subCategoryId`（二级）**不会同时有值** ——
+ * 由下面「平台分类」的级联框按选中的层级二选一发，见 `categoryPath` 的说明。
  *
  * `title` / `author` 是**包含匹配**（模糊搜索）—— 后端把它们编译成转义过的正则，
  * 用不上索引。这是 2026-10-10 用户明确要求的，代价已知并接受。
@@ -105,12 +144,18 @@ const sortAsc = ref(false)
  * - `minCollectedAt` / `maxCollectedAt`：**年月日**，格式 `yyyy-MM-dd`。
  *   后端转成 `Date` 做真正的日期区间比较（`lastCollectedAt` 是 BSON date）。
  *   ⚠️ 上限**含当天整天**（后端补到 23:59:59.999）。
+ *
+ * <h3>`newRatingTitle`（2026-10-12 新增）</h3>
+ * 筛的是**档位文案**（`神作` / `好评如潮` …），与 `minRating` / `maxRating` 的**数值**区间
+ * 是两回事。候选项**写死**在下面的 `RATING_TITLE_OPTIONS`（用户 2026-10-12 选定不加接口）。
  */
 const query = reactive<{
   categoryId?: number
+  subCategoryId?: number
   minRating?: number
   maxRating?: number
   minReadingCount?: number
+  newRatingTitle?: string
   targetType: '' | 'CATEGORY' | 'RANKING'
   targetId?: string
   title?: string
@@ -123,47 +168,250 @@ const query = reactive<{
   targetType: '',
 })
 
+/**
+ * 「评价标题」（`books.newRatingTitle`）的候选项。
+ *
+ * <h3>🔴 为什么写死在这里，而不是加个接口</h3>
+ * 用户 2026-10-12 明确选了「前端写死」。**代价已知**：微信读书新增档位时这里会漏
+ * —— 2026-10-12 实测库里就多出一个上次调研没有的 `烂书一本`（2 本）。
+ * 要改成数据驱动，得加 `GET /api/books/rating-titles`（对 `books` 做 `distinct` 聚合）。
+ *
+ * <p>⚠️ 顺序是用户 2026-10-12 **手工重排**的，**不再是**「库里数量降序」—— 现在按档位从高到低
+ * （值得一读 → 好评如潮 → 脍炙人口 → 神作潜力 → 神作 → 褒贬不一 → 不值一读 → 烂书一本），
+ * 最后三项 `评分不足` / `待评分` / `暂无评级` 是**没有档位**的状态，收尾。
+ * （库里数量参考：评分不足 14672 / 待评分 4179 / 值得一读 2334 / 好评如潮 1869 / 脍炙人口 1596 /
+ * 神作潜力 1233 / 神作 1146 / 褒贬不一 633 / 不值一读 23 / 烂书一本 2）
+ *
+ * <p>⚠️ 「暂无评级」那一项的 value 是**哨兵**，不是真实档位：库里 46%（23678 本）**没有**
+ * 这个字段，后端 `BookRepository.buildCriteria` 见到哨兵会把条件拼成「字段为 null 或不存在」。
+ */
+const RATING_TITLE_NONE = '__NONE__'
+
+const RATING_TITLE_OPTIONS: Array<{ label: string; value: string }> = [
+  { label: '值得一读', value: '值得一读' },
+  { label: '好评如潮', value: '好评如潮' },
+  { label: '脍炙人口', value: '脍炙人口' },
+  { label: '神作潜力', value: '神作潜力' },
+  { label: '神作', value: '神作' },
+  { label: '褒贬不一', value: '褒贬不一' },
+  { label: '不值一读', value: '不值一读' },
+  { label: '烂书一本', value: '烂书一本' },
+  { label: '评分不足', value: '评分不足' },
+  { label: '待评分', value: '待评分' },
+  { label: '暂无评级', value: RATING_TITLE_NONE },
+]
+
 /** 字典：分类与榜单。用于筛选栏的下拉框，也用于把 sourceKey 翻译成人话 */
 const categories = ref<TaxonomyItem[]>([])
 const rankings = ref<TaxonomyItem[]>([])
 
 /**
- * 「平台分类」筛选项 —— 🔴 **只列一级分类**。
+ * 「平台分类」级联框 —— **一个框、两级**（2026-10-12 改造）。
  *
- * 后端 `BookQuery.categoryId` 精确匹配 `categories.categoryId`，而二级分类的 code
- * 是 `subCategoryId`，**是另一个字段**。把二级 code 列进来，选中后恒不匹配、
- * 静默返回 0 条 —— 用户会以为「这个分类没数据」，是最难排查的那类问题。
+ * <h3>为什么必须是级联，而不是「把二级也塞进原来的单选下拉」</h3>
+ * 后端一级分类匹配 `categories.categoryId`、二级分类匹配 `categories.subCategoryId`
+ * —— **两个不同的键**。旧实现只列一级，正是因为把二级 code 塞进 `categoryId` 会
+ * **恒不匹配、静默返回 0 条**（不报错），用户只会以为「这个分类没数据」。
+ * 级联框化解了这个矛盾：**选中的层级本身就是信息**，一级发 `categoryId`、二级发 `subCategoryId`。
+ *
+ * <h3>⚠️ 二级分类的 `name` 自带父级前缀，展示时要剥掉</h3>
+ * 字典里二级的 `name` 是「一级-二级」形式（如 `期刊杂志-财经`；2026-10-12 实测 166 条
+ * **全部**如此）。直接用会显示成「期刊杂志 / 期刊杂志-财经」这种重复，所以剥掉 `${父名}-`。
  */
-const categoryOptions = computed(() =>
-  categories.value
-    .filter((c) => !c.parentCode)
-    .map((c) => ({
-      value: Number(c.code),
-      label: `${c.name}（${c.code}）`,
-    })),
-)
+interface CategoryNode {
+  value: number
+  label: string
+  children?: CategoryNode[]
+}
 
 /**
- * 采集来源的目标候选，跟着 targetType 走。
+ * 级联框的字段映射。
  *
- * ⚠️ 与上面的 `categoryOptions` 相反，这里**必须包含二级分类** ——
- * 它匹配的是 `Book.collectSource`（形如 `category:200003`），二级本来就该出现在这里。
+ * - **`checkStrictly: true` —— 允许只选一级**。选一级 = 筛该分类下的全部书（含它的二级），
+ *   这是改造前 `el-select` 的既有行为，不能丢（后端按 `categories.categoryId` 本来就能带出二级的书）。
+ * - **`checkOnClickNode: true` —— 必须显式开**。⚠️ 实测 Element Plus 2.14.6 的
+ *   `cascader-panel/src/node.vue` 里 `handleClick` 是：
+ *   `isLeaf && !checkStrictly && !multiple` → 选中；否则要求
+ *   `checkOnClickNode && (multiple || checkStrictly)`；**再否则只展开、不选中**。
+ *   而 `checkOnClickNode` 默认是 **false** → **光开 `checkStrictly` 是选不中一级分类的**
+ *   （点「文学」只会展开，选不上）。两个都要开。
+ * - **`emitPath: true`（默认）—— 必须拿完整路径**。靠路径长度区分选的是哪一级：
+ *   `[一级]` → 发 `categoryId`；`[一级, 二级]` → 发 `subCategoryId`。
+ *   若改成 `emitPath: false` 只拿末级 code，就再也分不清 `1700000` 是「一级被选中」
+ *   还是「某个二级恰好等于它」了。
  */
-const targetOptions = computed(() => {
-  const source = query.targetType === 'RANKING' ? rankings.value : categories.value
-  return source.map((t) => ({ value: t.code, label: `${t.name}（${t.code}）` }))
+const CASCADER_PROPS = {
+  value: 'value',
+  label: 'label',
+  children: 'children',
+  checkStrictly: true,
+  checkOnClickNode: true,
+  emitPath: true,
+}
+
+/** 「期刊杂志」的一级 code（后端 `CollectLoop.JOURNAL_CATEGORY_ID` 也是这个值） */
+const JOURNAL_CATEGORY_ID = 1700000
+
+/**
+ * 「平台分类」的级联树：一级 + 挂在它下面的二级。
+ * 顺序沿用字典返回的顺序（后端按 `sort` 排好，不在这里重排）。
+ */
+const categoryTree = computed<CategoryNode[]>(() => {
+  const byParent = new Map<string, TaxonomyItem[]>()
+  categories.value.forEach((c) => {
+    if (!c.parentCode) {
+      return
+    }
+    const list = byParent.get(c.parentCode)
+    if (list) {
+      list.push(c)
+    } else {
+      byParent.set(c.parentCode, [c])
+    }
+  })
+  return categories.value
+    .filter((c) => !c.parentCode)
+    .map((c) => {
+      const node: CategoryNode = {
+        value: Number(c.code),
+        label: `${c.name}（${c.code}）`,
+      }
+      const prefix = `${c.name}-`
+      const kids = (byParent.get(c.code) ?? []).map((k) => ({
+        value: Number(k.code),
+        // 剥掉父名前缀：`期刊杂志-财经` → `财经`
+        label: `${k.name.startsWith(prefix) ? k.name.slice(prefix.length) : k.name}（${k.code}）`,
+      }))
+      if (kids.length > 0) {
+        node.children = kids
+      }
+      return node
+    })
 })
 
 /**
- * 切换采集来源类型时清空已选目标。
+ * 级联框选中的路径。`[]` = 不筛；`[一级]` = 筛一级；`[一级, 二级]` = 筛二级。
  *
- * 不清的话会出这种事：先选「分类 + 文学」，再切成「榜单」——
- * 目标还留着 "300000"，而后端会拿 `ranking:300000` 去匹配，永远 0 条。
- * 更糟的是它不报错，看起来就像「这个榜单一本书都没有」。
+ * 用**本地 ref** 而不是直接绑 `query.categoryId`：级联的值是个数组，
+ * 而 `BookQuery` 要的是两个标量字段，中间必须有一次「按层级拆解」的翻译（见 `applyCategoryPath`）。
+ *
+ * ⚠️ 这里刻意**不用 `v-model`** —— 级联的 `update:modelValue` 载荷类型是
+ * `CascaderValue | null | undefined`（含 string / number / 对象），绑到 `number[]` 上过不了 `vue-tsc`。
+ * 改成 `:model-value` + `@change` 单向绑定，等价且类型安全。
  */
-function handleTargetTypeChange(): void {
-  query.targetId = undefined
+const categoryPath = ref<number[]>([])
+
+/** 把级联框的原始值归一成 `number[]`（`null` / 非数组 / 被清空 → `[]`） */
+function normalizeCategoryPath(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  return value.map((v) => Number(v)).filter((v) => !Number.isNaN(v))
 }
+
+/**
+ * 把「平台分类」的选中路径落到 `query` 上，并做排序联动。级联框的 `@change`
+ * 与「重置」共同调用它。
+ *
+ * <h3>排序联动（2026-10-12 需求）—— 三个口径由用户拍板</h3>
+ * 1. **一级和二级都触发**：选「期刊杂志」（1700000）或它下面任意二级分类
+ *    （财经 / 生活 / 文学 / 其他）都算；
+ * 2. **切走恢复默认**：换成别的分类或清空，排序回到「推荐值降序」（= 后端默认值）；
+ * 3. **允许手动覆盖**：联动只在**分类变化这一刻**生效一次，之后用户点表头可自由改
+ *    —— 所以这里是「设置一次」，不是「锁死」。
+ *
+ * <p>口径 1 / 2 的落地在 `applySortForCategory()`：它**只在期刊状态翻转时**才动手，
+ * 所以「从没碰过期刊杂志 → 点重置」不会把用户手动选的排序冲掉。
+ */
+function applyCategoryPath(path: number[]): void {
+  categoryPath.value = path
+  const journal = (path[0] ?? -1) === JOURNAL_CATEGORY_ID
+  if (path.length === 0) {
+    query.categoryId = undefined
+    query.subCategoryId = undefined
+  } else if (path.length === 1) {
+    query.categoryId = path[0]
+    query.subCategoryId = undefined
+  } else {
+    query.categoryId = undefined
+    query.subCategoryId = path[1]
+  }
+  applySortForCategory(journal)
+}
+
+/**
+ * 级联框实例。**只为了在一个地方调 `togglePopperVisible(false)`**。
+ *
+ * <h3>⚠️ 为什么必须手动收起</h3>
+ * `el-cascader` 在 `checkStrictly` 模式下**选中后不会自动收起下拉** ——
+ * `cascader-panel` 的 `handleCheckChange` 里那行是
+ * `emitClose && !multiple && !checkStrictly && emit("close")`，**条件里带 `!checkStrictly`**。
+ * 而为了保住「能选一级」的能力，我们又必须开 `checkStrictly`。
+ * 折中：**选到二级（叶子）时手动收起**；只选了一级时**保持展开**，用户还要继续往下点。
+ *
+ * <p>类型写成结构化的最小接口、而不是 `InstanceType<typeof ElCascader>`：
+ * 只为调一个方法，没必要把整个组件类型拖进来。
+ */
+const cascaderRef = ref<{ togglePopperVisible?: (visible?: boolean) => void } | null>(null)
+
+/** 级联框的 `@change`：归一 → 落 query → 联动排序 → 回第 1 页重查 */
+function onCategoryChange(value: unknown): void {
+  const path = normalizeCategoryPath(value)
+  applyCategoryPath(path)
+  // 选到二级（叶子）→ 收起下拉（原因见 cascaderRef）；只选一级时保持展开，方便继续往下点
+  if (path.length >= 2) {
+    cascaderRef.value?.togglePopperVisible?.(false)
+  }
+  page.value = 1
+  scheduleReload()
+}
+
+/**
+ * 「上一次的分类是不是期刊杂志」。用来判断**期刊状态有没有真的翻转** ——
+ * 排序联动只在**翻转的那一刻**生效一次（口径 3：之后允许用户手动改）。
+ *
+ * <p>⚠️ 为什么要有这个闸，而不是「每次分类变化都按当前分类设一遍排序」：
+ * 那样的话，用户从没碰过期刊杂志、只是手动按「阅读人数」排了序，
+ * 点一下「重置」（会走到 `applyCategoryPath([])`）就会被无声地把排序冲回推荐值降序
+ * —— 那不是需求 2 说的场景（口径 2 讲的是「**从期刊杂志切走**」）。
+ */
+let lastJournal = false
+
+/**
+ * 按「是不是期刊杂志」把排序设成出版时间倒序 / 推荐值降序。
+ *
+ * <p>**只在期刊状态翻转时动手**（见 `lastJournal`）：选「期刊杂志」→ 出版时间倒序；
+ * 从它切到别的分类或清空 → 推荐值降序。用户在这之后手动点表头改排序，不会被冲掉。
+ *
+ * <p>只有**排序真的变了**才换 `tableKey` 重建表格 —— 来回切同一个分类
+ * （或本来就在默认排序上）不该白白重建一次。
+ *
+ * <p>重建会清掉 el-table 的内部选中态，所以顺手清空 `selectedRows`：
+ * 否则「批量删除（N）」会拿着一批界面上根本没勾选的行。这与 ProTable
+ * 「翻页不保留选中」的既有取舍一致。
+ */
+function applySortForCategory(journal: boolean): void {
+  if (journal === lastJournal) {
+    return
+  }
+  lastJournal = journal
+  const nextField: BookSortField = journal ? 'publishTime' : 'newRating'
+  const nextAsc = false
+  if (sortField.value === nextField && sortAsc.value === nextAsc) {
+    return
+  }
+  sortField.value = nextField
+  sortAsc.value = nextAsc
+  selectedRows.value = []
+  tableKey.value += 1
+}
+
+/*
+ * ⚠️ 2026-10-12：用户把筛选栏里的「采集来源」项删了（他不关心 `collectSource`），
+ * 只服务于它的 `targetOptions`（目标下拉候选）与 `handleTargetTypeChange`（切类型清目标）
+ * 一并删除 —— 留着会被 `noUnusedLocals` 判为未使用，前端直接编译不过。
+ * `query.targetType` / `query.targetId` 两个字段暂时保留：它们不报错，且 `load()` 仍会带上。
+ */
 
 /** `sourceKey`（"category:300000"）→ 「分类 · 文学」这样的人话 */
 function sourceText(sourceKey?: string | null): string {
@@ -186,69 +434,72 @@ function sourceList(sourceKeys?: string[] | null): string[] {
   return sourceKeys.map(sourceText)
 }
 
+/**
+ * 推荐值 0~1000 → 百分比文案。`913` → `"91.3%"`。
+ *
+ * <p>口径与「发布配置」「发布记录」「藏书阁抽屉」保持一致（那三处各自有一份同名实现，
+ * 格式都是 `(v / 10).toFixed(1) + '%'`）。图书库原来直接显示 0~1000 的原始值，
+ * 是唯一不一致的一处。
+ *
+ * <p>⚠️ **只改展示，不改筛选**：`BookQuery.minRating / maxRating` 仍然是 0~1000
+ * （后端 `newRating` 就是这个量纲），筛选栏也保持原样 —— 和「发布配置」的行为一致。
+ */
+function ratingText(v?: number | null): string {
+  return v === null || v === undefined ? '-' : `${(v / 10).toFixed(1)}%`
+}
+
+/**
+ * `categories[]` 里除首项之外的分类标题。
+ *
+ * <p>为什么去掉首项：`Book.category`（字符串）**恒等于 `categories[0].title`**
+ * （已对全库 51352 本逐条核对，不一致 0 本）。首项已经在上面那行显示过了，
+ * 再列一遍就是同一个标签出现两次。所以这一列 = 「category 主行 + 其余标签」。
+ *
+ * <p>顺带按出现顺序去重：平台偶尔会把同一个 title 打两遍。
+ */
+function extraCategoryTitles(row: Book): string[] {
+  if (!Array.isArray(row.categories)) {
+    return []
+  }
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const c of row.categories) {
+    const t = c?.title
+    if (!t || t === row.category || seen.has(t)) {
+      continue
+    }
+    seen.add(t)
+    out.push(t)
+  }
+  return out
+}
+
 // ---------------------------------------------------------------------------
 // 加载
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// 藏书阁：当前页里哪些书已在藏书阁（决定操作列显示「添加藏书」还是「移除藏书」）
+// 藏书 / 阅读清单：两个独立维度（决定操作列「更多」下拉里显示什么）
 // ---------------------------------------------------------------------------
 
 /**
- * 已在藏书阁的 bookId（当前页）。
+ * 两个维度的状态与五个动作 —— 与精选图书 / 我的藏书 / 阅读清单**同一套实现**。
  *
- * <p>用数组 + `includes` 而不是 Set：这两个操作都在当前页（≤20 条）范围内，数组足够；
- * 而且「整体替换」的赋值方式对响应式最稳。
- */
-const onShelfIds = ref<string[]>([])
-const shelfBusy = ref(false)
-
-function isOnShelf(bookId?: string | null): boolean {
-  return !!bookId && onShelfIds.value.includes(bookId)
-}
-
-/** 拉当前页的藏书状态。失败不影响列表本身（当成「都不在藏书阁」） */
-async function loadShelfStatus(list: Book[]): Promise<void> {
-  const ids = list.map((b) => b.bookId).filter((x): x is string => !!x)
-  if (ids.length === 0) {
-    onShelfIds.value = []
-    return
-  }
-  try {
-    onShelfIds.value = await fetchShelfStatus(ids)
-  } catch {
-    onShelfIds.value = []
-  }
-}
-
-/**
- * 添加 / 移除藏书（操作列那一个按钮，按状态切换文案）。
+ * <p>🔴 收藏（`shelf_books`）与阅读计划（`reading_list`）**不可互相推导**：
+ * 这里只分别读「在不在藏书阁」与「阅读状态」，不会用其中一个去算另一个。
  *
- * <p>成功后只改本地状态，<b>不整页重拉</b> —— 藏书状态不影响图书列表的筛选 / 排序，
- * 重拉反而会让用户的滚动位置和翻页丢失。失败则弹 message 并保持原状。
+ * <p>本页列的是**全部图书**，与两个维度都无关，所以移除后**不需要**从表格里去掉行
+ * —— 两个回调都不传。
  */
-async function toggleShelf(row: Book): Promise<void> {
-  const id = row.bookId
-  if (!id || shelfBusy.value) {
-    return
-  }
-  shelfBusy.value = true
-  try {
-    if (isOnShelf(id)) {
-      await removeFromShelf(id)
-      onShelfIds.value = onShelfIds.value.filter((x) => x !== id)
-      ElMessage.success('已从藏书阁移除')
-    } else {
-      const added = await addToShelf(id)
-      onShelfIds.value = onShelfIds.value.concat(id)
-      ElMessage.success(added ? '已添加到藏书阁' : '这本书已在藏书阁中')
-    }
-  } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e))
-  } finally {
-    shelfBusy.value = false
-  }
-}
+const {
+  busy: actionBusy,
+  isOnShelf,
+  readingStatusOf,
+  loadStatus,
+  toggleShelf,
+  toggleReadingList,
+  setReadingStatus,
+} = useBookActions()
 
 /** 防止「页码越界纠正」反复触发 */
 let correcting = false
@@ -266,8 +517,8 @@ async function load(): Promise<void> {
     const result = await pageBooks(payload)
     rows.value = result.list
     total.value = result.total
-    // 藏书状态跟着这一页一起刷新（失败不影响列表）
-    await loadShelfStatus(result.list)
+    // 两个维度（藏书 / 阅读清单）的状态跟着这一页一起刷新；失败各自兜底，不影响列表
+    await loadStatus(result.list)
 
     // 页码越界纠正：在第 3 页删光后 page=3 会返回空列表，用户以为数据没了。
     // 退回最后一页重来一次（只做一次，避免死循环）。
@@ -328,10 +579,14 @@ function handleSearch(): void {
 }
 
 function handleReset(): void {
-  query.categoryId = undefined
+  // 「平台分类」走级联框，单独清：`applyCategoryPath([])` 会一并清掉 categoryId / subCategoryId，
+  // 并且**如果之前选的是期刊杂志**，还会按「切走恢复默认排序」把排序复位
+  // （2026-10-12 需求 2 的口径 2）。从来没碰过期刊杂志时，排序保持用户手动选的那个。
+  applyCategoryPath([])
   query.minRating = undefined
   query.maxRating = undefined
   query.minReadingCount = undefined
+  query.newRatingTitle = undefined
   query.targetType = ''
   query.targetId = undefined
   query.title = undefined
@@ -538,7 +793,7 @@ onMounted(() => {
 
 <template>
   <div class="page">
-    <!-- ================= 筛选栏（16 个查询参数） ================= -->
+    <!-- ================= 筛选栏（18 个查询参数） ================= -->
     <SearchForm
       :model="query"
       :loading="loading"
@@ -548,107 +803,97 @@ onMounted(() => {
       @reset="handleReset"
     >
       <!--
-        顺序是用户 2026-10-10 指定的：平台分类 → 书名 → 作者 → 出版时间 →
-        推荐值区间 → 阅读人数 → 采集来源 → 采集时间。
-        `span-2` 的项都是「一个标签下放两个控件」或内容较长（平台分类的选项形如
-        「文学（300000）」），单列放不下；正好把 4 列排满 3 行，没有空洞。
+        顺序由用户 2026-10-12 重排：书名 → 作者 → 推荐值区间 → 阅读人数 →
+        平台分类 → 出版时间 → 评价标签 → 采集时间（同日**移除了「采集来源」筛选项**）。
+        `span-2` 的项都是「一个标签下放两个控件」或内容较长（平台分类是**两级级联框**，
+        选项形如「文学（300000）」，选到二级还要再展开一层），单列放不下；
+        4 个单列 + 4 个 `span-2` 正好把 4 列排满 3 行，没有空洞。
       -->
-      <el-form-item label="平台分类" class="span-2">
-        <el-select v-model="query.categoryId" clearable filterable placeholder="全部">
-          <el-option
-            v-for="opt in categoryOptions"
-            :key="opt.value"
-            :label="opt.label"
-            :value="opt.value"
-          />
-        </el-select>
-      </el-form-item>
 
       <el-form-item label="书名">
-        <el-input v-model="query.title" clearable placeholder="模糊搜索，含即可" />
+        <el-input v-model="query.title" clearable placeholder="模糊搜索" />
       </el-form-item>
 
       <el-form-item label="作者">
-        <el-input v-model="query.author" clearable placeholder="模糊搜索，含即可" />
-      </el-form-item>
-
-      <!-- 出版时间：**年月**，两个月份组件。两个都可以空，只填一个也生效 -->
-      <el-form-item label="出版时间" class="span-2">
-        <div class="range">
-          <el-date-picker
-            v-model="query.minPublishTime"
-            type="month"
-            value-format="YYYY-MM"
-            placeholder="起始年月"
-          />
-          <span class="range-sep">~</span>
-          <el-date-picker
-            v-model="query.maxPublishTime"
-            type="month"
-            value-format="YYYY-MM"
-            placeholder="结束年月"
-          />
-        </div>
+        <el-input v-model="query.author" clearable placeholder="模糊搜索" />
       </el-form-item>
 
       <el-form-item label="推荐值区间">
         <div class="range">
           <el-input-number
-            v-model="query.minRating"
-            :min="0"
-            :max="1000"
-            :controls="false"
-            placeholder="下限"
+              v-model="query.minRating"
+              :min="0"
+              :max="1000"
+              :controls="false"
+              placeholder="下限"
           />
           <span class="range-sep">~</span>
           <el-input-number
-            v-model="query.maxRating"
-            :min="0"
-            :max="1000"
-            :controls="false"
-            placeholder="上限"
+              v-model="query.maxRating"
+              :min="0"
+              :max="1000"
+              :controls="false"
+              placeholder="上限"
           />
         </div>
       </el-form-item>
 
+
       <el-form-item label="阅读人数">
         <el-input-number
-          v-model="query.minReadingCount"
-          :min="0"
-          :controls="false"
-          placeholder="下限，不限则空"
+            v-model="query.minReadingCount"
+            :min="0"
+            :controls="false"
+            placeholder="下限，不限则空"
         />
       </el-form-item>
 
-      <el-form-item label="采集来源" class="span-2">
-        <div class="range">
-          <el-select
-            v-model="query.targetType"
-            clearable
-            placeholder="类型"
-            class="source-type"
-            @change="handleTargetTypeChange"
-          >
-            <el-option label="分类" value="CATEGORY" />
-            <el-option label="榜单" value="RANKING" />
-          </el-select>
-          <el-select
-            v-model="query.targetId"
+      <el-form-item label="平台分类" class="span-2">
+        <el-cascader
+            ref="cascaderRef"
+            :model-value="categoryPath"
+            :options="categoryTree"
+            :props="CASCADER_PROPS"
             clearable
             filterable
-            :disabled="!query.targetType"
-            placeholder="目标"
-            class="source-target"
-          >
-            <el-option
-              v-for="opt in targetOptions"
+            placeholder="全部（可选到二级分类）"
+            class="category-cascader"
+            @change="onCategoryChange"
+        />
+      </el-form-item>
+
+
+      <!-- 出版时间：**年月**，两个月份组件。两个都可以空，只填一个也生效 -->
+      <el-form-item label="出版时间" class="span-2">
+        <div class="range">
+          <el-date-picker
+              v-model="query.minPublishTime"
+              type="month"
+              value-format="YYYY-MM"
+              placeholder="起始年月"
+          />
+          <span class="range-sep">~</span>
+          <el-date-picker
+              v-model="query.maxPublishTime"
+              type="month"
+              value-format="YYYY-MM"
+              placeholder="结束年月"
+          />
+        </div>
+      </el-form-item>
+
+      <el-form-item label="评价标签" class="span-2">
+        <el-select v-model="query.newRatingTitle" clearable placeholder="全部档位">
+          <el-option
+              v-for="opt in RATING_TITLE_OPTIONS"
               :key="opt.value"
               :label="opt.label"
               :value="opt.value"
-            />
-          </el-select>
-        </div>
+          />
+        </el-select>
       </el-form-item>
+
+
 
       <!--
         采集时间：**年月日**，两个日期组件。
@@ -672,17 +917,19 @@ onMounted(() => {
         </div>
       </el-form-item>
 
-      <div class="query-hint">
-        共 16 个查询参数，条件之间是「与」的关系。书名与作者是<b>模糊搜索</b>
-        （包含匹配，大小写不敏感，特殊字符会按字面量处理）；采集来源要「类型 + 目标」都选才生效。
-        两个时间区间都是<b>只填一个也生效</b>：出版时间按<b>年月</b>（后端按字符串字典序比较），
-        采集时间按<b>年月日</b>（后端按日期区间比较，<b>结束日含当天整天</b>）。
-      </div>
+
     </SearchForm>
 
     <!-- ================= 表格 ================= -->
     <el-card shadow="never" class="table-card">
+      <!--
+        `:key` = `tableKey` —— 只在「分类联动改了排序」时 +1，用来强制重建表格。
+        原因：el-table 只在挂载时读一次 `default-sort`，程序化改排序后表头箭头不会跟着变
+        （详见 `defaultSort` / `applySortForCategory` 的注释）。
+        用户点表头改排序**不会**换 key，那时 el-table 自己管箭头。
+      -->
       <ProTable
+        :key="tableKey"
         :data="rows"
         :loading="loading"
         :total="total"
@@ -691,7 +938,7 @@ onMounted(() => {
         :page-sizes="[20, 50, 100]"
         row-key="bookId"
         selectable
-        :default-sort="{ prop: 'newRating', order: 'descending' }"
+        :default-sort="defaultSort"
         max-height="calc(100vh - 430px)"
         empty-text="没有符合条件的图书"
         @update:page="handlePageChange"
@@ -786,26 +1033,43 @@ onMounted(() => {
           <template #default="{ row }">{{ dash(row.author) }}</template>
         </el-table-column>
 
+        <!--
+          平台分类：第一行是 category（= categories[0].title），
+          下面把 categories[] 里**其余**的 title 也一并列出来（最多见过 5 个，99.9% 是 1~3 个）。
+          ⚠️ 不要用 show-overflow-tooltip —— 多标签会换行，截断后用户看不到剩下的分类。
+        -->
         <el-table-column
           v-if="cols.isVisible('category')"
           prop="category"
           label="平台分类"
-          min-width="150"
-          show-overflow-tooltip
+          min-width="176"
         >
-          <template #default="{ row }">{{ dash(row.category) }}</template>
+          <template #default="{ row }">
+            <div class="cat-cell">
+              <span class="cat-main">{{ dash(row.category) }}</span>
+              <el-tag
+                v-for="t in extraCategoryTitles(row)"
+                :key="t"
+                size="small"
+                effect="plain"
+                class="cat-tag"
+              >
+                {{ t }}
+              </el-tag>
+            </div>
+          </template>
         </el-table-column>
 
         <el-table-column
           v-if="cols.isVisible('newRating')"
           prop="newRating"
           label="推荐值"
-          width="88"
+          width="78"
           align="right"
           sortable="custom"
         >
           <template #default="{ row }">
-            <span class="num">{{ dash(row.newRating) }}</span>
+            <span class="num">{{ ratingText(row.newRating) }}</span>
           </template>
         </el-table-column>
 
@@ -880,17 +1144,27 @@ onMounted(() => {
         <el-table-column
           v-if="cols.isVisible('actions')"
           label="操作"
-          width="220"
+          width="200"
           fixed="right"
           align="center"
         >
           <template #default="{ row }">
             <el-button link type="primary" @click="openDetail(row)">详情</el-button>
             <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-            <!-- 藏书阁：按状态显示一个按钮（已在 → 移除；否则 → 添加） -->
-            <el-button link type="warning" :disabled="shelfBusy" @click="toggleShelf(row)">
-              {{ isOnShelf(row.bookId) ? '移除藏书' : '添加藏书' }}
-            </el-button>
+            <!--
+              藏书 / 阅读清单 / 阅读状态共五个动作，收进「更多」下拉。
+              平铺要 250px 以上，而默认列宽总和已经贴着 1440 屏的表格容器宽度
+              （Element Plus 的横向滚动条默认隐藏，超了用户只会以为「右边少了几列」）。
+            -->
+            <BookActionMenu
+              :book-id="row.bookId"
+              :on-shelf="isOnShelf(row.bookId)"
+              :reading-status="readingStatusOf(row.bookId)"
+              :disabled="actionBusy"
+              @toggle-shelf="row.bookId && toggleShelf(row.bookId)"
+              @toggle-reading="row.bookId && toggleReadingList(row.bookId)"
+              @set-status="(s) => row.bookId && setReadingStatus(row.bookId, s)"
+            />
             <el-button link type="danger" :disabled="deleting" @click="confirmDelete(row)">
               删除
             </el-button>
@@ -903,7 +1177,7 @@ onMounted(() => {
     <DetailDrawer
       v-model="detailVisible"
       :title="detailBook?.title || '图书详情'"
-      :subtitle="detailBook ? `${detailBook.author || '佚名'} · 推荐值 ${dash(detailBook.newRating)} · ${detailItemCount} 个字段` : ''"
+      :subtitle="detailBook ? `${detailBook.author || '佚名'} · 推荐值 ${ratingText(detailBook.newRating)} · ${detailItemCount} 个字段` : ''"
       :sections="detailSections"
       :loading="detailLoading"
       width="760px"
@@ -967,12 +1241,23 @@ onMounted(() => {
 }
 
 /*
- * 跨两列。用在「一个标签下要放两个控件」的筛选项（出版时间 / 采集时间 / 采集来源）
- * 和选项文案较长的平台分类上 —— 单列放不下，会被压到没法用。
- * 8 个筛选项按 4 列排，正好 3 行排满，没有空洞。
+ * 跨两列。用在「一个标签下要放两个控件」的筛选项（出版时间 / 采集时间）
+ * 和选项文案较长的平台分类 / 评价标签上 —— 单列放不下，会被压到没法用。
+ * 2026-10-12 重排后共 8 个筛选项：4 个单列 + 4 个 `span-2` = 12 列单位，
+ * 正好把 4 列排满 3 行，没有空洞。
  */
 .span-2 {
   grid-column: span 2;
+}
+
+/*
+ * ⚠️ `el-cascader` 默认是 `display: inline-block` 且**没有 width**
+ * （Element Plus 2.14.6 的 `dist/index.css` 里 `.el-cascader` 只有
+ * `display:inline-block;position:relative`），放进网格会缩成内容宽度。
+ * 给它 100%，才和同排的 `el-select` / 日期区间一样占满 `span-2`。
+ */
+.category-cascader {
+  width: 100%;
 }
 .source-type {
   width: 104px;
@@ -1007,6 +1292,27 @@ onMounted(() => {
 
 .source-tag {
   margin: 0 4px 2px 0;
+}
+
+/*
+ * 平台分类单元格：主行（category）在下，其余分类标签在上一行之后自动换行。
+ * ⚠️ 不能设 `white-space: nowrap` —— 那会把多余的标签裁掉，
+ * 而这一列存在的意义就是「把所有平台分类都看到」。
+ */
+.cat-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  line-height: 1.5;
+}
+
+.cat-main {
+  word-break: break-all;
+}
+
+.cat-tag {
+  max-width: 100%;
 }
 
 .col-panel {

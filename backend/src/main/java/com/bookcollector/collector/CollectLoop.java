@@ -16,6 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -128,14 +129,11 @@ public class CollectLoop {
                     "排除分类 " + excludedCodes + "（命中的图书不写库）");
         }
 
-        // 出版月份过滤（只对配了 publishMonth 的目标生效，目前是期刊杂志这一类）。
-        // 数据源接口没有日期参数，非本月的期号只能在解析完之后按 publishTime 挡掉。
-        String publishMonth = cmd.getPublishMonth();
-        if (publishMonth != null) {
-            log.info("本次采集只保留 {} 出版的图书（按 publishTime 过滤）", publishMonth);
-            progress.info(cmd.getRunId(), cmd.getTaskId(),
-                    "只保留 " + publishMonth + " 出版的图书");
-        }
+        // 期刊杂志只采本月（历史期号没必要采）。判据是书自己
+        // （categories[0].categoryId == 1700000），与采集目标无关 ——
+        // 见 keepJournalCurrentMonth。
+        log.info("期刊杂志（categories[0].categoryId={}）只保留 {} 出版的期号",
+                JOURNAL_CATEGORY_ID, YearMonth.now());
 
         // ---- 起始游标 ----
         // skipCursor = true：全程不碰游标（不读、不重置、不推进）。
@@ -238,9 +236,10 @@ public class CollectLoop {
                 //   放在 upsert 之前而不是之后 —— 写进去再删要多一次写库，
                 //   而且中间那一瞬用户能在图书库里看到它们。
                 List<Book> books = categoryFilter.exclude(parsed, excludedCodes);
-                // ★ 月份过滤：只保留出版月份命中的书（publishMonth=null 时原样返回）。
-                //   同样放在 upsert 之前 —— 老期号压根不写库，而不是写进去再删。
-                books = keepPublishMonth(books, publishMonth);
+                // ★ 期刊杂志只采本月：按书自己判（categories[0].categoryId == 1700000），
+                //   非期刊原样保留。同样放在 upsert 之前 —— 老期号压根不写库，
+                //   而不是写进去再删。
+                books = keepJournalCurrentMonth(books);
                 int excluded = parsed.size() - books.size();
                 UpsertStat stat = writer.upsertAll(books, sourceKey);
                 int saved = stat.total();
@@ -343,24 +342,51 @@ public class CollectLoop {
         return result;
     }
 
+    /** 期刊杂志的一级分类 ID。数据源把大类放在 {@code categories[0]} */
+    private static final int JOURNAL_CATEGORY_ID = 1700000;
+
     /**
-     * 只保留「出版月份 == month」的图书（{@code month} 形如 {@code "2026-10"}）。
+     * 只保留「本月」的期刊杂志 —— 采集链路里的第二道闸（第一道是按分类排除）。
      *
-     * <p>{@code month == null}（绝大多数调用方）时原样返回，不做任何复制。
-     * 取不到月份（{@code publishTime} 为空 / 不足 7 位）的书<b>不保留</b> ——
-     * 见 {@code CollectCommand#publishMonth} 的口径说明。
+     * <p><b>判据是书自己</b>：{@code categories[0].categoryId == 1700000}（期刊杂志这一大类）。
+     * 命中即视为期刊，只保留 {@code publishTime} 在本月的期号；<b>非期刊的书原样保留</b>。
+     * 所以这条规则<b>与采集目标无关</b> —— 无论采的是期刊分类、某个榜单、还是别的分类，
+     * 只要结果里混进了期刊，都会按本月过滤。
+     *
+     * <p><b>为什么按书判、而不是按目标 code 判</b>：期刊杂志有多个二级分类
+     * （财经 / 生活 / 文学 / 其他…），一级 code 也可能随数据源变动。按目标 code
+     * 维护一份清单必然漏项，而漏项的表现是「某期期刊悄悄多采了一堆历史期号」——
+     * 最难看出来的那类静默失败。{@code categories[0].categoryId} 是数据源自带的，
+     * 不需要我们维护。
+     *
+     * <p>取不到月份（{@code publishTime} 为空 / 不足 7 位）的期刊<b>不保留</b> ——
+     * 既然只要本月，无法确认月份的就该挡在外面。
      */
-    private List<Book> keepPublishMonth(List<Book> books, String month) {
-        if (books == null || books.isEmpty() || month == null) {
+    private List<Book> keepJournalCurrentMonth(List<Book> books) {
+        if (books == null || books.isEmpty()) {
             return books;
         }
+        String month = YearMonth.now().toString();
         List<Book> kept = new ArrayList<Book>(books.size());
         for (Book book : books) {
-            if (month.equals(monthOf(book.getPublishTime()))) {
-                kept.add(book);
+            // 非期刊一律放行；期刊则要求出版月份 == 本月
+            if (isJournal(book) && !month.equals(monthOf(book.getPublishTime()))) {
+                continue;
             }
+            kept.add(book);
         }
         return kept;
+    }
+
+    /** 这本书是不是期刊杂志：看 {@code categories[0].categoryId} 是不是 {@value #JOURNAL_CATEGORY_ID} */
+    private boolean isJournal(Book book) {
+        List<Book.BookCategory> categories = book.getCategories();
+        if (categories == null || categories.isEmpty()) {
+            return false;
+        }
+        Book.BookCategory first = categories.get(0);
+        return first != null && first.getCategoryId() != null
+                && first.getCategoryId().intValue() == JOURNAL_CATEGORY_ID;
     }
 
     /** 从 {@code "2026-10-08 00:00:00"} 取月份（前 7 位）；取不到返回 {@code null} */

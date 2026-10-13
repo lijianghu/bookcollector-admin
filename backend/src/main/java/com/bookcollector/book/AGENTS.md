@@ -15,7 +15,7 @@
 | `service/BookService` | Service 接口 | 5 个方法（分页/详情/编辑/删除/批量删除） |
 | `service/impl/BookServiceImpl` | Service 实现 | 三条业务规则（404 / 白名单组装 / 删前确认存在） |
 | `repository/BookRepository` | Repository | Mongo 访问：分页、upsert、局部更新、批量删 |
-| `req/BookQuery` | req | 12 个筛选条件 + 排序白名单 + 分页归一化 |
+| `req/BookQuery` | req | 14 个筛选条件 + 排序白名单 + 分页归一化 |
 | `req/BookUpdateRequest` | req | 编辑请求体（**刻意不含不可改字段**） |
 | `req/BatchDeleteRequest` | req | 批量删除请求体 |
 | `entity/Book` | Entity | 46 个业务字段 + 4 个扩展字段 + 3 个采集元数据；3 个嵌套内部类 |
@@ -79,14 +79,25 @@ BookController ──► BookService(Impl) ──► BookRepository ──► bo
 
 | 方法 | 路由 | 说明 |
 |---|---|---|
-| GET | `/api/books` | 分页筛选。参数对象直接绑 `BookQuery`（12 个查询条件） |
+| GET | `/api/books` | 分页筛选。参数对象直接绑 `BookQuery`（18 个查询条件 = 14 个筛选 + 排序 / 分页） |
 | GET | `/api/books/{bookId}` | 详情（46 业务字段 + 采集元数据） |
 | PUT | `/api/books/{bookId}` | 编辑（**局部更新**，只写请求体里出现的字段） |
 | DELETE | `/api/books/{bookId}` | 单条删除。⚠️ 下次采集到会被重新写入（**删除不是永久拉黑**） |
 | POST | `/api/books/batch-delete` | 批量删除，返回 `requested` + `deleted`（**两者可能不同**） |
 
-**筛选条件**：`categoryId` / `minRating` / `maxRating` / `minReadingCount` /
-`targetType` + `targetId`（采集来源）/ `author` / `minPublishTime` / `maxPublishTime`。
+**筛选条件（14 个）**：`categoryId`（一级分类）/ `subCategoryId`（二级分类）/ `minRating` / `maxRating` /
+`minReadingCount` / `newRatingTitle` / `targetType` + `targetId`（采集来源）/ `title` / `author` /
+`minPublishTime` / `maxPublishTime` / `minCollectedAt` + `maxCollectedAt`（采集时间）。
+
+⚠️ 2026-10-10 新增 `title` / `minCollectedAt` / `maxCollectedAt`；**2026-10-12 新增 `newRatingTitle` / `subCategoryId`**；
+⚠️ `categoryId` 与 `subCategoryId` 是 `categories[]` 里的**两个不同的键**（一级 / 二级），**不会同时非空**；
+把二级 code 当 `categoryId` 传会**恒不匹配、静默返回 0 条** —— 图书库页的「平台分类」用**一个级联框**同时覆盖两级。
+`title` 与 `author` 是**包含匹配**（走 `RegexUtil.contains`，未锚定正则用不上索引 —— 全集合扫描**已接受**）；
+`minCollectedAt` / `maxCollectedAt` 走 **Date 区间**（库字段 `lastCollectedAt` 是 Date），
+与出版时间的**字符串字典序**是**两种不同的比较方式**，别混。
+`newRatingTitle` 是**档位文案**精确匹配（`神作` / `好评如潮` / `评分不足` …），与 `minRating` /
+`maxRating` 的**数值**区间是**两回事**；传哨兵 `__NONE__`（`BookQuery.TITLE_NONE`）表示「暂无评级」
+—— 库里 46% 的书没有这个字段，MongoDB 的 `{field: null}` 会同时匹配「值是 null」与「字段不存在」。
 
 **排序字段白名单**（`BookQuery#resolveSortPath()`）：`newRating`（默认）/ `readingCount` /
 `newRatingCount` / `lastCollectedAt` / `publishTime`。

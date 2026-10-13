@@ -29,7 +29,7 @@ import java.util.Map;
  *
  * <p>分页列表直接收 {@link BookQuery} 作为查询参数对象 —— Spring MVC 会把
  * {@code ?categoryId=300000&minRating=800&page=2} 自动绑上去。
- * 不写 {@code @RequestParam} 逐个声明，是因为查询条件有 16 个，
+ * 不写 {@code @RequestParam} 逐个声明，是因为查询条件有 18 个，
  * 逐个声明只会让签名长到看不见重点，而绑定规则完全一样。
  */
 @Tag(name = "02. 图书库", description = "分页筛选 / 详情 / 编辑 / 删除")
@@ -44,7 +44,8 @@ public class BookController {
     }
 
     @Operation(summary = "分页查询图书",
-            description = "支持按 分类ID / 评分区间 / 阅读人数下限 / 采集来源 / 书名 / 作者 / "
+            description = "支持按 分类ID / 二级分类ID / 评分区间 / 阅读人数下限 / 采集来源 / "
+                    + "书名 / 作者 / 评价标签 / "
                     + "出版时间区间（年月，字符串字典序） / 采集时间区间（年月日，Date 区间，含当天） 筛选；"
                     + "支持按 评分/阅读人数/评价人数/出版时间/采集时间 排序。"
                     + "书名与作者是包含匹配（模糊搜索，大小写不敏感，正则已转义）。")

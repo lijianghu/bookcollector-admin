@@ -2,7 +2,6 @@ package com.bookcollector.refresh.service.impl;
 
 import com.bookcollector.collector.CollectLoop;
 import com.bookcollector.collector.CollectProgressListener;
-import com.bookcollector.collector.CurrentMonthOnlyTargets;
 import com.bookcollector.collector.dto.CollectCommand;
 import com.bookcollector.collector.dto.CollectResult;
 import com.bookcollector.common.BizException;
@@ -420,9 +419,8 @@ public class RefreshServiceImpl implements RefreshService {
                 .targetType(target.getType())
                 .targetId(target.getTargetId())
                 .targetName(target.getName())
-                // 期刊杂志只保留本月的期号（历史期号没必要采）；榜单不设这个条件（null = 不过滤）
-                .publishMonth(CurrentMonthOnlyTargets.publishMonthOrNull(
-                        target.getType(), target.getTargetId()))
+                // 期刊杂志「只采本月」不在这里配置：它按书自己判
+                // （categories[0].categoryId == 1700000），在 CollectLoop 里生效。
                 // 不限页数：一直翻到空页为止
                 .maxPages(0)
                 // skipCursor=true 时这个字段不生效，写 false 是为了表明「不是重置语义」

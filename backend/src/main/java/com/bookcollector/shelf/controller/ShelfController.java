@@ -55,17 +55,22 @@ public class ShelfController {
     }
 
     @Operation(summary = "分页取书",
-            description = "默认每页 30 条（前端一屏 10 列 × 3 行）。"
-                    + "category 可传一级或带二级的完整类目名（内部截到一级）；不传 = 取全部")
+            description = "默认每页 30 条（前端不传 size 时的兜底值；藏书阁一屏 8 列 × 3 行 = 24 条，会显式传 size）。"
+                    + "category 可传一级或带二级的完整类目名（内部截到一级）；不传 = 取全部。"
+                    + "title / author 是**包含匹配**（模糊搜索，大小写不敏感），不传 = 不筛；三个条件之间是「与」")
     @GetMapping("/books")
     public ResultBean<PageResult<ShelfBookVO>> books(
             @Parameter(description = "一级类目名，如 文学；不传 = 全部")
             @RequestParam(required = false) String category,
+            @Parameter(description = "书名关键词，包含匹配（模糊）；不传 = 不筛")
+            @RequestParam(required = false) String title,
+            @Parameter(description = "作者关键词，包含匹配（模糊）；不传 = 不筛")
+            @RequestParam(required = false) String author,
             @Parameter(description = "页码，从 1 开始")
             @RequestParam(required = false) Integer page,
             @Parameter(description = "每页条数，默认 30，上限 200")
             @RequestParam(required = false) Integer size) {
-        return ResultBean.ok(service.pageBooks(category, page, size));
+        return ResultBean.ok(service.pageBooks(category, title, author, page, size));
     }
 
     @Operation(summary = "添加藏书",

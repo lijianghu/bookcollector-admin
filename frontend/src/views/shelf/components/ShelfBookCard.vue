@@ -11,13 +11,16 @@ import { bookVisual, fallbackCoverStyle } from '@/utils/shelfVisual'
  * 整墙看过去仍是一堆贴在木板上的图片。这次用 CSS 3D 把它做成一本书：
  *
  * <pre>
- * .stage   透视容器（perspective / perspective-origin 略高于中心 → 看得到顶面）
- *   ├ ::before   环境遮蔽 + 接触阴影（平铺，不在 3D 上下文里）
- *   ├ ::after    木质层板的一段（左右各探进列间距，相邻卡片连成一条通板）
- *   └ .book  transform-style: preserve-3d，绕 Y 轴偏一个角 → 书脊侧露出来
- *        ├ .cover  前面板  translateZ(+thick/2)   ← 真实封面
- *        ├ .spine  左侧面  rotateY(-90deg) → 书脊（厚度）+ 竖排书名
- *        └ .top    上切面  rotateX(-90deg) → 顶部厚度（书口）
+ * .card
+ *   ├ .stage   透视容器（perspective / perspective-origin 略高于中心 → 看得到顶面）
+ *   │   ├ ::before   环境遮蔽 + 接触阴影（平铺，不在 3D 上下文里）
+ *   │   ├ ::after    木质层板的一段（左右各探进列间距，相邻卡片连成一条通板）
+ *   │   └ .book  transform-style: preserve-3d，绕 Y 轴偏一个角 → 书脊侧露出来
+ *   │        ├ .cover  前面板  translateZ(+thick/2)   ← 真实封面
+ *   │        ├ .spine  左侧面  rotateY(-90deg) → 书脊（厚度）+ 竖排书名
+ *   │        └ .top    上切面  rotateX(-90deg) → 顶部厚度（书口）
+ *   ├ .meta    书名 / 作者
+ *   └ ::after  抽屉面（左右各探出 6px，一整排连成一条柜体 —— 这就是「阁」）
  * </pre>
  *
  * <p>⚠️ 书脊那面用的是 **-90°** 而不是 +90°：`backface-visibility` 默认 visible，
@@ -40,6 +43,20 @@ const emit = defineEmits<{
 }>()
 
 const label = computed(() => props.book.title || '未命名')
+
+/**
+ * 推荐值角标文案：0~1000 → 百分比（`913` → `91.3%`）。
+ *
+ * <p>2026-10-12 统一口径 —— 与图书库列表 / 图书库详情抽屉 / 藏书阁抽屉一致。
+ * 在这之前角标直接渲染原始值（显示 `913`），是**同一页里唯一没换算的地方**。
+ *
+ * <p>⚠️ 实测库里 `newRating` 全部 > 0（`shelf_books` 4401/4401），所以这里**不需要**
+ * 像抽屉那样把 0 当作「无评分」处理；空值仍由模板的 `v-if` 挡掉。
+ */
+const ratingText = computed(() => {
+  const r = props.book.newRating
+  return r === null || r === undefined ? '' : `${(r / 10).toFixed(1)}%`
+})
 
 /** 封面加载失败时的生成式封面（颜色与 bookId 绑定，同一本书永远同一个配色） */
 const generatedStyle = computed(() => fallbackCoverStyle(props.book.bookId))
@@ -103,8 +120,8 @@ const bookStyle = computed<Record<string, string>>(() => ({
           <span class="hinge" aria-hidden="true" />
           <span class="sheen" aria-hidden="true" />
 
-          <!-- 推荐值角标 -->
-          <span v-if="book.newRating != null" class="rating">{{ book.newRating }}</span>
+          <!-- 推荐值角标（0~1000 → 百分比，见 script 里的 ratingText） -->
+          <span v-if="ratingText" class="rating">{{ ratingText }}</span>
         </div>
 
         <!-- 左侧面：书脊（厚度）+ 书脊上的书名 -->
@@ -130,6 +147,39 @@ const bookStyle = computed<Record<string, string>>(() => ({
   /* 层板占掉一点，把书名往下推一点，别贴着木板 */
   gap: 15px;
   cursor: pointer;
+  /* 抽屉面（::after）要挂在这一格的底边上 */
+  position: relative;
+}
+
+/*
+ * ================= 「阁」的那一层：抽屉面 =================
+ *
+ * 每一格的底部挂一段抽屉面板。相邻卡片的这一段左右各探出 6px（= 列间距 12px 的一半），
+ * 首尾正好相接 —— 于是一整排连成一条**柜体**，上面 8 个抽屉、每个一个拉手。
+ * 这是「藏书阁」的「阁」：不只是一排层板，底下还有一排能拉开的抽屉。
+ *
+ * 位置：`bottom: -15px` 落在网格的行间距里（行间距 30px），不会压到下一排的书。
+ * ⚠️ 行间距与这里的 15px 是配套的，改一个必须改另一个（在 `views/shelf/index.vue` 的 `.grid`）。
+ *
+ * 拉手是用**背景图层**画的（居中一小段深色凹槽），不额外加 DOM ——
+ * 这样「调整一下」就真的只是调整样式，不用动模板结构。
+ */
+.card::after {
+  content: '';
+  position: absolute;
+  left: -6px;
+  right: -6px;
+  bottom: -15px;
+  height: 15px;
+  border-radius: 0 0 3px 3px;
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0.66) 0%, rgba(0, 0, 0, 0.3) 100%) no-repeat 50% 7px /
+      38px 4px,
+    linear-gradient(180deg, #7a5632 0%, #5c3f22 26%, #432c16 68%, #2a1a0c 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 220, 168, 0.5),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.6),
+    0 7px 12px -5px rgba(0, 0, 0, 0.9);
 }
 
 /* ================= 3D 舞台 ================= */

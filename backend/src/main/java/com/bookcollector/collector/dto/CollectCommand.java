@@ -51,21 +51,6 @@ public class CollectCommand {
      */
     private Set<String> excludeCategories;
 
-    /**
-     * 只保留「出版月份 == 该值」的图书，格式 {@code "2026-10"}。{@code null} = 不过滤。
-     *
-     * <p>期刊杂志类目标（定时刷新与「任务配置」两条链路）用它。期刊按期上新，
-     * 一次全量重采会把<b>历史上所有月份</b>的期号都拉回来，而用户只要本月的。
-     * 数据源接口<b>没有日期参数</b>（URL 只有 {@code maxIndex}），
-     * 所以只能在这道闸上按 {@code Book.publishTime} 过滤。
-     *
-     * <p><b>口径</b>：取 {@code publishTime} 的<b>前 7 位</b>比月份
-     * （{@code "2026-10-08 00:00:00"} → {@code "2026-10"}）。取不到月份的书<b>不保留</b>
-     * —— 既然只要本月，无法确认月份的就该挡在外面。
-     * （期刊的 {@code publishTime} 实测无缺失、无脏值，这条兜底只是防御。）
-     */
-    private String publishMonth;
-
     /** 是否忽略已有游标、从 0 开始重采。默认 false（续传） */
     private boolean resetCursor;
 

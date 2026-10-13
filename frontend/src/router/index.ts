@@ -43,10 +43,27 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '图书库' },
       },
       {
+        // 2026-10-12：候选清单从「发布配置」拆出来，成为「图书库 → 精选图书」。
+        // ⚠️ 路由仍是**扁平路径**（不是 /books 下再嵌 children）—— 菜单里的两级
+        // 结构由 menu.ts 的父子关系表达，路由不需要跟着嵌套（同 publish/* 的做法）。
+        path: 'books/featured',
+        name: 'books-featured',
+        component: () => import('@/views/book/featured/index.vue'),
+        meta: { title: '精选图书' },
+      },
+      {
         path: 'shelf',
         name: 'shelf',
         component: () => import('@/views/shelf/index.vue'),
-        meta: { title: '藏书阁' },
+        // 2026-10-12：「藏书阁」升级成了菜单分组名，这一页改叫「我的藏书」。
+        // ⚠️ 路径保持 /shelf 不变 —— 改路径对验收脚本和用户书签都是无谓的破坏。
+        meta: { title: '我的藏书' },
+      },
+      {
+        path: 'shelf/reading',
+        name: 'shelf-reading',
+        component: () => import('@/views/shelf/reading/index.vue'),
+        meta: { title: '阅读清单' },
       },
       {
         path: 'tasks',

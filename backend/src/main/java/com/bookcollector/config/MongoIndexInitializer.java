@@ -74,6 +74,7 @@ public class MongoIndexInitializer implements ApplicationRunner {
         created += initBookInterpretations();
         created += initPublishRecord();
         created += initShelfBooks();
+        created += initReadingList();
 
         log.info("========== 索引初始化完成：{} 个索引，耗时 {} ms ==========",
                 created, System.currentTimeMillis() - start);
@@ -420,6 +421,41 @@ public class MongoIndexInitializer implements ApplicationRunner {
                 .on("addedAt", Sort.Direction.DESC)
                 .on("_id", Sort.Direction.DESC)
                 .named("idx_category_addedAt"));
+
+        return 2;
+    }
+
+    /**
+     * reading_list —— 阅读清单（2026-10-12 新增）。
+     *
+     * <p>只建 2 个索引。
+     *
+     * <h3>★ {@code uk_bookId} 是正确性依赖，不是性能优化</h3>
+     * 同一本书在阅读清单里只能有一行 —— 这是「重复加入是幂等的」的前提
+     * （见 {@code ReadingListServiceImpl.add}：先查在不在再插，并发下靠这个索引兜底）。
+     *
+     * <p>⚠️ 它与 {@code shelf_books} 的 {@code uk_bookId} 是<b>两张表各自的</b>唯一键 ——
+     * 「收藏」与「阅读计划」是两个独立维度：同一本书可以在两张表里各有一行，
+     * 也可以只在一张里。这里不存在、也不该有跨表的唯一约束。
+     *
+     * <p>{@code idx_status_updated} 服务「按状态筛 + 按最近变更排序」：复合索引的
+     * 最左前缀就是 {@code status}，所以不再单独建 {@code idx_status}。
+     *
+     * <p>它同时是 {@code reading_list} 集合的<b>唯一建表入口</b> ——
+     * 见类注释「顺带解决集合不存在的问题」。
+     */
+    private int initReadingList() {
+        IndexOperations ops = mongoTemplate.indexOps("reading_list");
+
+        ops.ensureIndex(new Index()
+                .on("bookId", Sort.Direction.ASC)
+                .unique()
+                .named("uk_bookId"));
+
+        ops.ensureIndex(new Index()
+                .on("status", Sort.Direction.ASC)
+                .on("statusUpdatedAt", Sort.Direction.DESC)
+                .named("idx_status_updated"));
 
         return 2;
     }
