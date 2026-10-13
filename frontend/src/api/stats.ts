@@ -1,8 +1,8 @@
 import { request } from './request'
-import type { StatsCharts, StatsOverview } from '@/types'
+import type { Book, PageResult, StatsCharts, StatsOverview } from '@/types'
 
 /**
- * 仪表盘统计接口（2 个）。
+ * 仪表盘统计接口（3 个）。
  *
  * <h3>为什么拆成两个端点而不是一个</h3>
  * 「4 个数字」和「4 张图」的耗时差一个数量级：数字是 4 个 `count`，
@@ -29,5 +29,20 @@ export function getCharts() {
   return request<StatsCharts>({
     url: '/stats/charts',
     method: 'get',
+  })
+}
+
+/**
+ * 「今日新增」图书明细。点仪表盘那张指标卡弹出的列表。
+ *
+ * ⚠️ 后端用的是**同一个条件**（`firstCollectedAt >= 今天零点，Asia/Shanghai`），
+ * 所以这里的 `total` 必然等于指标卡上的 `todayCollected`。
+ * 两者对不上就说明有一边的口径被改坏了。
+ */
+export function getTodayCollected(params: { page?: number; size?: number }) {
+  return request<PageResult<Book>>({
+    url: '/stats/today-collected',
+    method: 'get',
+    params,
   })
 }

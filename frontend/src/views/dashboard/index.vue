@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { getCharts, getOverview } from '@/api/stats'
+import { getCharts, getOverview, getTodayCollected } from '@/api/stats'
 import { ping, type PingData } from '@/api/ping'
-import { formatDateTime, formatNumber, formatRelative } from '@/utils/format'
+import { formatDateTime, formatNumber, formatRelative, ratingToStars } from '@/utils/format'
 import {
   AXIS_LABEL_STYLE,
   CHART_COLORS,
   SPLIT_LINE_STYLE,
   type ChartOption,
 } from '@/utils/echarts'
-import type { StatsCharts, StatsOverview } from '@/types'
+import type { Book, StatsCharts, StatsOverview } from '@/types'
 import BaseChart from '@/components/BaseChart.vue'
 
 /**
@@ -93,6 +93,58 @@ async function refreshAll(): Promise<void> {
 onMounted(refreshAll)
 
 // ======================================================================
+// 「今日新增」明细弹窗（点指标卡弹出）
+// ======================================================================
+
+/**
+ * 后端用的是**同一个条件**（`firstCollectedAt >= 今天零点，Asia/Shanghai`），
+ * 所以这里的 `total` 必然等于指标卡上的 `todayCollected` —— 这是刻意保证的，不是巧合。
+ *
+ * 按需加载（弹窗打开才发请求），不塞进 `refreshAll`：绝大多数时候用户不会点它，
+ * 没必要在每次打开仪表盘时都多打一次分页查询。
+ */
+const todayVisible = ref(false)
+const todayLoading = ref(false)
+const todayError = ref('')
+const todayRows = ref<Book[]>([])
+const todayTotal = ref(0)
+const todayPage = ref(1)
+const todaySize = ref(20)
+
+async function loadTodayCollected(): Promise<void> {
+  todayLoading.value = true
+  todayError.value = ''
+  try {
+    const res = await getTodayCollected({ page: todayPage.value, size: todaySize.value })
+    todayRows.value = res.list
+    todayTotal.value = res.total
+  } catch (e) {
+    todayError.value = e instanceof Error ? e.message : String(e)
+    todayRows.value = []
+    todayTotal.value = 0
+  } finally {
+    todayLoading.value = false
+  }
+}
+
+/** 每次打开都从第 1 页重新拉 —— 否则会看到上次翻到一半的旧数据 */
+function openTodayCollected(): void {
+  todayVisible.value = true
+  todayPage.value = 1
+  loadTodayCollected()
+}
+
+function handleTodayPageChange(page: number): void {
+  todayPage.value = page
+  loadTodayCollected()
+}
+
+/** 跨页连续编号（服务端分页，`type="index"` 只会从 1 重新数） */
+function todayIndex(index: number): number {
+  return (todayPage.value - 1) * todaySize.value + index + 1
+}
+
+// ======================================================================
 // 指标卡
 // ======================================================================
 
@@ -103,6 +155,8 @@ interface MetricCard {
   icon: string
   color: string
   hint: string
+  /** 可点击的卡片（目前只有「今日新增」，点了弹明细列表） */
+  clickable?: boolean
 }
 
 const metrics = computed<MetricCard[]>(() => {
@@ -141,10 +195,18 @@ const metrics = computed<MetricCard[]>(() => {
       value: o.todayCollected,
       icon: 'TrendCharts',
       color: '#f56c6c',
-      hint: '口径：firstCollectedAt（净新增）',
+      hint: '口径：firstCollectedAt（净新增）· 点击看明细',
+      clickable: true,
     },
   ]
 })
+
+/** 只有标了 `clickable` 的指标卡可点 */
+function onMetricClick(card: MetricCard): void {
+  if (card.clickable) {
+    openTodayCollected()
+  }
+}
 
 // ======================================================================
 // 图 1 · 分类分布（环形饼图）
@@ -407,7 +469,14 @@ const recentSummary = computed(() => {
         </el-card>
       </template>
 
-      <el-card v-for="card in metrics" :key="card.key" shadow="never" class="metric">
+      <el-card
+        v-for="card in metrics"
+        :key="card.key"
+        shadow="never"
+        class="metric"
+        :class="{ 'metric-clickable': card.clickable }"
+        @click="onMetricClick(card)"
+      >
         <div class="metric-body">
           <div class="metric-icon" :style="{ background: card.color + '1a', color: card.color }">
             <el-icon :size="22"><component :is="card.icon" /></el-icon>
@@ -420,6 +489,65 @@ const recentSummary = computed(() => {
         </div>
       </el-card>
     </div>
+
+    <!-- ================= 今日新增明细（点指标卡弹出） ================= -->
+    <el-dialog
+      v-model="todayVisible"
+      title="今日新增图书"
+      width="920px"
+      top="7vh"
+      :close-on-click-modal="false"
+    >
+      <div class="today-head">
+        <span class="text-muted">
+          口径：<code>firstCollectedAt</code> ≥ 今天零点（Asia/Shanghai）——
+          与指标卡上那个数字是同一个条件
+        </span>
+        <el-tag type="danger" effect="plain" size="small">
+          共 {{ formatNumber(todayTotal) }} 本
+        </el-tag>
+      </div>
+
+      <el-alert
+        v-if="todayError"
+        type="error"
+        :closable="false"
+        show-icon
+        title="列表加载失败"
+        :description="todayError"
+      />
+
+      <el-table v-else v-loading="todayLoading" :data="todayRows" size="small" border height="440">
+        <el-table-column type="index" label="#" width="56" align="center" :index="todayIndex" />
+        <el-table-column prop="title" label="书名" min-width="220" show-overflow-tooltip />
+        <el-table-column prop="author" label="作者" min-width="130" show-overflow-tooltip />
+        <el-table-column prop="category" label="平台分类" min-width="150" show-overflow-tooltip />
+        <el-table-column label="推荐值" width="100" align="center">
+          <template #default="{ row }">{{ ratingToStars(row.newRating) }}</template>
+        </el-table-column>
+        <el-table-column label="评价" width="96" align="center">
+          <template #default="{ row }">{{ row.newRatingTitle || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="采集时间" width="160">
+          <template #default="{ row }">{{ formatDateTime(row.firstCollectedAt) }}</template>
+        </el-table-column>
+        <template #empty>
+          <span class="text-muted">今天还没有新增的图书</span>
+        </template>
+      </el-table>
+
+      <div class="today-footer">
+        <el-pagination
+          :current-page="todayPage"
+          :page-size="todaySize"
+          :total="todayTotal"
+          layout="total, prev, pager, next"
+          background
+          small
+          @current-change="handleTodayPageChange"
+        />
+      </div>
+    </el-dialog>
 
     <!-- ================= 4 张图 ================= -->
     <el-alert
@@ -665,5 +793,37 @@ const recentSummary = computed(() => {
 .bad {
   color: #f56c6c;
   font-weight: 500;
+}
+
+/* ---------------- 今日新增明细弹窗 ---------------- */
+
+/* 可点击的指标卡：给一点「这玩意能点」的反馈，否则用户根本想不到要试 */
+.metric-clickable {
+  cursor: pointer;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.metric-clickable:hover {
+  border-color: #f56c6c;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+}
+
+.today-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.today-head code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #f5f7fa;
+  font-size: 12px;
+}
+.today-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 </style>

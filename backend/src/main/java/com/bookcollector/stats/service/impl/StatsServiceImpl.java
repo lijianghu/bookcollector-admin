@@ -2,6 +2,7 @@ package com.bookcollector.stats.service.impl;
 
 import com.bookcollector.audit.entity.ApiRequest;
 import com.bookcollector.book.entity.Book;
+import com.bookcollector.common.PageResult;
 import com.bookcollector.common.enums.TargetType;
 import com.bookcollector.cursor.entity.CollectCursor;
 import com.bookcollector.stats.service.StatsService;
@@ -9,9 +10,11 @@ import com.bookcollector.task.TaskRegistry;
 import com.bookcollector.task.entity.CollectTask;
 import com.bookcollector.taxonomy.repository.TaxonomyRepository;
 import com.bookcollector.taxonomy.entity.TaxonomyItem;
+import com.bookcollector.util.PageQueryUtil;
 import org.bson.Document;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.aggregation.Aggregation;
 import org.springframework.data.mongodb.core.aggregation.AggregationOperation;
@@ -125,6 +128,28 @@ public class StatsServiceImpl implements StatsService {
         data.put("publishYearTrend", publishYearTrend());
         data.put("recentCollected", recentCollected());
         return data;
+    }
+
+    // ==================================================================
+    // 「今日新增」明细列表（点指标卡弹出的弹窗）
+    // ==================================================================
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p><b>为什么不建新表</b>：{@code books.firstCollectedAt} 就是「这本书第一次进库的时间」，
+     * 指标卡数的正是它。另立一张「新增记录表」只会多出一份需要同步的状态；而且 upsert 是幂等的 ——
+     * 同一本书重采不会产生第二条记录，新表反而要把这个语义自己再维护一遍。
+     *
+     * <p>排序补 {@code _id} 兜底：批量 upsert 时同一批书的 {@code firstCollectedAt} 是同一个
+     * 时间戳，只按它排的话同值记录在翻页时可能重复或漏掉（{@link PageQueryUtil} 的既有约定）。
+     */
+    @Override
+    public PageResult<Book> todayCollectedBooks(Integer pageNum, Integer pageSize) {
+        Criteria criteria = Criteria.where("firstCollectedAt").gte(startOfToday());
+        Sort sort = Sort.by(Sort.Order.desc("firstCollectedAt"), Sort.Order.asc("_id"));
+        return PageQueryUtil.getPageResult(mongoTemplate, pageNum, pageSize,
+                criteria, Book.class, sort);
     }
 
     /**

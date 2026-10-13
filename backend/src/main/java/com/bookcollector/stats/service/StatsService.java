@@ -1,5 +1,8 @@
 package com.bookcollector.stats.service;
 
+import com.bookcollector.book.entity.Book;
+import com.bookcollector.common.PageResult;
+
 import java.util.Map;
 
 /**
@@ -32,4 +35,18 @@ public interface StatsService {
 
     /** 4 张图（FR-F2）：分类分布 / 评分分布 / 出版年份趋势 / 近 7 天采集量 */
     Map<String, Object> charts();
+
+    /**
+     * 「今日新增」图书明细（点仪表盘那张指标卡弹出的列表）。
+     *
+     * <p>🔴 <b>口径必须与 {@link #overview()} 的 {@code todayCollected} 完全一致</b>：
+     * {@code firstCollectedAt >= 今天零点（Asia/Shanghai）}。
+     * 指标卡说 39 本、点开却只有 12 条，比不给这个功能还糟 —— 所以这里刻意复用同一个
+     * {@code startOfToday()}，而不是「最近 24 小时」这种看着差不多、实际每天零点后
+     * 就会和指标卡对不上的口径。
+     *
+     * @param pageNum  页码，从 1 开始（{@code <1} 归一为 1）
+     * @param pageSize 每页条数（{@code <1} 归一为 20，{@code >200} 截到 200）
+     */
+    PageResult<Book> todayCollectedBooks(Integer pageNum, Integer pageSize);
 }

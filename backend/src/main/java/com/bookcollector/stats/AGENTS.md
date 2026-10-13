@@ -1,6 +1,6 @@
 # stats 模块知识
 
-> 包路径：`com.bookcollector.stats` · 最后更新：2026-09-23
+> 包路径：`com.bookcollector.stats` · 最后更新：2026-10-12
 > **本模块的核心是「统计口径」。改之前先读第 6 节。**
 
 ## 1. 这个模块是干什么的
@@ -11,9 +11,9 @@
 
 | 类 | 角色 | 一句话职责 |
 |---|---|---|
-| `controller/StatsController` | Controller | 2 个端点（`/overview` / `/charts`） |
-| `service/StatsService` | Service 接口 | 2 个方法 |
-| `service/impl/StatsServiceImpl` | Service 实现 | 4 个指标 + 4 张图的全部管道（417 行） |
+| `controller/StatsController` | Controller | 3 个端点（`/overview` / `/charts` / `/today-collected`） |
+| `service/StatsService` | Service 接口 | 3 个方法 |
+| `service/impl/StatsServiceImpl` | Service 实现 | 4 个指标 + 4 张图 + 今日新增明细的全部查询 |
 
 ## 3. 调用关系（图谱）
 
@@ -44,8 +44,10 @@ StatsController ──► StatsService(Impl) ──┬──► MongoTemplate（
 |---|---|---|
 | GET | `/api/stats/overview` | `{ bookTotal, categoryTotal, taskTotal, todayCollected, categoryEnabled, rankingTotal, rankingEnabled, taskRunning, activeRuns, cursorTotal, requestTotal, last7DaysCollected, lastCollectedAt }` |
 | GET | `/api/stats/charts` | `{ categoryDistribution, ratingDistribution, publishYearTrend, recentCollected }` |
+| GET | `/api/stats/today-collected` | `PageResult<Book>`（分页参数 `page` / `size`，默认 1 / 20，上限 200）。2026-10-12 新增 |
 
 **为什么拆成两个端点**：数字要先出，图表慢不该拖住数字。
+（第三个端点 `today-collected` 是**按需**拉的 —— 弹窗打开才发请求，不影响这条原则。）
 
 ## 6. 不变量与铁律 ← 改这个模块前必读
 
@@ -101,6 +103,15 @@ StatsController ──► StatsService(Impl) ──┬──► MongoTemplate（
     那张卡片从 22 跳到 188；而它回答的是「我采了哪几大类」。
     实现：`countTopCategories()`。**二级的数量刻意不在仪表盘展示**（用户 2026-09-29 定口径），
     要看二级清单去「分类配置」页，要看某个二级采了多少去「任务配置」按任务看。
+
+11. **🔴 「今日新增」指标卡和它的明细列表必须共用同一个条件。**
+    指标卡走 `countCollectedSince(startOfToday())`，列表走 `todayCollectedBooks(...)` ——
+    两处都基于 `startOfToday()`（Asia/Shanghai 零点），所以列表的 `total` 必然等于卡片上的数字。
+    **不要**把任一处改成「最近 24 小时」：那在每天零点之后就会和另一处对不上，
+    而「卡片说 39 本、点开只有 12 条」比不给这个功能更糟。
+    列表排序补 `_id` 兜底 —— 批量 upsert 时同一批书的 `firstCollectedAt` 是同一个时间戳，
+    只按它排的话同值记录在翻页时可能重复或漏掉。**不建新表**：`books.firstCollectedAt`
+    本来就是「第一次进库的时间」，另立一张表只会多一份要同步的状态。
 
 ## 7. 依赖与耦合
 
