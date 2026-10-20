@@ -15,7 +15,7 @@
   <artifactId>bookcollector-admin</artifactId>
   <version>1.0.0</version>
   <name>bookcollector-admin</name>
-  <description>微信读书图书采集后台（第一期）</description>
+  <description>读书图书采集后台</description>
 
   <properties>
     <java.version>1.8</java.version>
