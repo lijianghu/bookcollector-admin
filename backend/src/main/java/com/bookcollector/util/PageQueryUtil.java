@@ -34,7 +34,7 @@ import java.util.List;
  * </ol>
  *
  * <h3>参数归一化口径（全项目唯一来源）</h3>
- * {@code page < 1 → 1}、{@code size < 1 → 20}、{@code size > 200 → 200}。
+ * {@code page < 1 → 1}、{@code size < 1 → 20}、{@code size > 500 → 500}。
  * 调用方通常已经归一化过（如 {@code BookQuery#getSafePage()}），这里的兜底是<b>幂等</b>的。
  *
  * <h3>⚠️ count 必须在加 skip/limit 之前</h3>
@@ -49,8 +49,8 @@ public final class PageQueryUtil {
     /** 默认每页条数 */
     public static final int DEFAULT_SIZE = 20;
 
-    /** 每页条数上限，防止前端传 {@code size=100000} 把服务打爆 */
-    public static final int MAX_SIZE = 200;
+    /** 每页条数上限，防止前端传 {@code size=100000} 把服务打爆。2026-10-19：200 → 500（图书库列表需求） */
+    public static final int MAX_SIZE = 500;
 
     private PageQueryUtil() {
         throw new AssertionError("PageQueryUtil 工具类不允许实例化");
@@ -121,7 +121,7 @@ public final class PageQueryUtil {
         return (pageNum == null || pageNum < DEFAULT_PAGE) ? DEFAULT_PAGE : pageNum;
     }
 
-    /** {@code size < 1 → 20}、{@code size > 200 → 200} */
+    /** {@code size < 1 → 20}、{@code size > 500 → 500} */
     public static int normalizeSize(Integer pageSize) {
         if (pageSize == null || pageSize < 1) {
             return DEFAULT_SIZE;

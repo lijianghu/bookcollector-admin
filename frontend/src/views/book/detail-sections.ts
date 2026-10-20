@@ -17,7 +17,7 @@
  * 详见 `types/index.ts` 里 `lpushName` 的注释。
  *
  * <p>54 个接口键里，`newRatingDetail` / `maxFreeInfo` / `categories` 是嵌套结构，
- * 展开成独立条目后一共 **60 条**（`countDetailItems()` 会算出来，
+ * 展开成独立条目后一共 **59 条**（`countDetailItems()` 会算出来，
  * 页面上显示的就是这个数，避免写死一个数字后跟配置对不上）。
  * 分 5 组：基本信息 / 评分与热度 / 价格与免费 / 出版与版权 / 采集元信息，
  * 顺序按「用户想看的优先级」排，第一组默认展开。
@@ -73,13 +73,17 @@ export function buildBookDetailSections(book: Book): DetailSection[] {
         // 🔴 顶层 newRating，不是 newRatingDetail.newRating（后者不存在）
         { label: '推荐值', value: ratingText(book.newRating) },
         { label: '评价人数', value: book.newRatingCount },
+        // ⚠️ 用**顶层** `newRatingTitle`（BookParser 从 `newRatingDetail.title` 拍平来的）：
+        //    两者实测值完全相同（27833 条一致），但顶层多 11 条（只有拍平字段、没有子文档）。
+        // 🔴 2026-10-13：这里原来有**两行**（`评价标题` ← 顶层 + `评价标签` ← `newRatingDetail.title`），
+        //    展示的是同一个值 —— 已合并成一行。别把 `newRatingDetail?.title` 再加回来。
+        // ⚠️ 列头叫「评价标题」、筛选栏叫「评价标签」，是**刻意**的（见 s6-acceptance.mjs 3.5 的说明）。
         { label: '评价标题', value: book.newRatingTitle },
         { label: '阅读人数', value: book.readingCount },
         { label: '好评', value: book.newRatingDetail?.good },
         { label: '中评', value: book.newRatingDetail?.fair },
         { label: '差评', value: book.newRatingDetail?.poor },
         { label: '近期评价', value: book.newRatingDetail?.recent },
-        { label: '评价标签', value: book.newRatingDetail?.title },
         { label: '有讲书', value: flagText(book.hasLecture) },
         { label: '最新章节序号', value: book.lastChapterIdx },
         { label: '搜索序号', value: book.searchIdx },

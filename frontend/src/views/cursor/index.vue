@@ -4,7 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { deleteCursor, listCursors, setCursor } from '@/api/cursor'
 import ProTable from '@/components/ProTable.vue'
 import { dash, formatDateTime, formatNumber } from '@/utils/format'
-import type { CollectCursor } from '@/types'
+import { targetTypeLabel, type CollectCursor } from '@/types'
 
 /**
  * 采集游标（S6.5）。
@@ -222,7 +222,7 @@ onMounted(load)
         <el-table-column label="采集目标" min-width="200" show-overflow-tooltip>
           <template #default="{ row }">
             <el-tag size="small" effect="plain" class="type-tag">
-              {{ row.targetType === 'RANKING' ? '榜单' : '分类' }}
+              {{ targetTypeLabel(row.targetType) }}
             </el-tag>
             {{ row.targetName ?? '-' }}
             <span class="text-muted">（{{ row.targetId }}）</span>
@@ -301,7 +301,7 @@ onMounted(load)
       <el-alert type="info" :closable="false" class="dialog-tip">
         <template #title>
           目标：{{ dialogRow?.targetName ?? dialogRow?.targetId }}
-          （{{ dialogRow?.targetType === 'RANKING' ? '榜单' : '分类' }}）
+          （{{ targetTypeLabel(dialogRow?.targetType) }}）
         </template>
       </el-alert>
 

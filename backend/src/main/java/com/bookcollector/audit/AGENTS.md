@@ -1,10 +1,10 @@
 # audit 模块知识
 
-> 包路径：`com.bookcollector.audit` · 最后更新：2026-10-08
+> 包路径：`com.bookcollector.audit` · 最后更新：2026-10-15（深夜，回放保真度：skey 真值照用 + 丢弃头暴露）
 
 ## 1. 这个模块是干什么的
 
-每打完一次微信读书接口就落一条记录 —— **成功失败都记**。
+每打完一次平台接口就落一条记录 —— **成功失败都记**。
 
 这张表是排查「某页为什么没数据」的**第一现场**：能回答「到底发了几次请求、每次什么状态码、
 返回几条、耗时多少」。所以列表默认按时间倒序，且支持 `onlyFailed=true` 一键过滤异常请求。
@@ -14,17 +14,28 @@
 平均 / P95 / 最慢耗时。加它的原因很直接 —— 靠人逐页翻两百条记录去数失败次数，
 是把原始日志当报表用。
 
+**2026-10-15 又加了两个「单条」接口**：`GET /api/requests/{id}` 返回一条记录的完整现场
+（URL 参数 / 请求头掩码快照 / 原始 body / 该次运行的步骤日志）—— 回答「这次请求到底返了什么」；
+`POST /api/requests/replay`（请求体 `ReplayRequest{url, requestHeaders}`）用**最原始 HTTP**
+（JDK `HttpURLConnection`，不走 RestTemplate / 拦截器）按**提交的请求**重发 —
+URL / 参数 / 请求头在弹窗里均可修改，body 原文返回（不过 fastjson）——
+回答「把这个请求改一改再发会怎样」。**回放不写审计**（诊断动作不能污染采集次数的口径）。
+
 ## 2. 类清单
 
 | 类 | 角色 | 一句话职责 |
 |---|---|---|
-| `controller/RequestAuditController` | Controller | 2 个端点（分页 + 摘要），**极薄转发** |
-| `service/AuditService` | Service 接口 | 2 个方法（分页 + 摘要） |
-| `service/impl/AuditServiceImpl` | Service 实现 | 参数归一化 + 转发 |
+| `controller/RequestAuditController` | Controller | 4 个端点（分页 + 摘要 + 详情 + 回放），**极薄转发** |
+| `service/AuditService` | Service 接口 | 4 个方法（分页 + 摘要 + 详情 + 回放） |
+| `service/impl/AuditServiceImpl` | Service 实现 | 参数归一化 + 转发；回放只做「找记录 + 校验 URL 存在」 |
+| `service/RequestReplayer` | Service | 🔴 回放专用：`HttpURLConnection` 最原始 HTTP 重发 + skey 按域名规则替换 + 手工解 gzip/deflate + body 原文（不过 fastjson）+ 从 body 取响应 synckey |
 | `repository/ApiRequestRepository` | Repository | **写入**：`recordPage`，只插不改，**失败不抛异常** |
 | `repository/ApiRequestQueryRepository` | Repository | **查询**：条件拼装 + 排序 + 摘要聚合（`conditions()` 是筛选条件的唯一来源） |
-| `entity/ApiRequest` | Entity | 15 个字段（runId / 目标 / url / 状态码 / 耗时 / 结果数 / 错误摘要） |
+| `entity/ApiRequest` | Entity | 18 个字段（runId / 目标 / url / 状态码 / 耗时 / synckey / 结果数 / 错误摘要 + 2026-10-15 的 queryParams / requestHeaders / rawResponse） |
 | `dto/RequestSummary` | DTO | 摘要的返回体（total / failed / avgMs / p95Ms / maxMs） |
+| `dto/RequestDetail` | DTO | 详情返回体 = 审计记录 + 该 run 的步骤日志（最多 300 条） |
+| `dto/ReplayRequest` | DTO | 回放入参：url（唯一真相）+ requestHeaders（skey 真值照用、掩码/空才替换） |
+| `dto/ReplayResult` | DTO | 回放返回体：url / 参数 / 请求头（skey 掩码）/ **droppedHeaders（被 JDK 丢的头）** / **skeyFrom（skey 用了谁的）** / **shapeHint（形状一行指纹）** / 状态码 / 耗时 / 响应 synckey / body 原文 / errorMsg |
 
 > 写与查**刻意分成两个类**，见铁律 1。
 
@@ -55,6 +66,8 @@ RequestAuditController ──► AuditService(Impl) ──► ApiRequestQueryRep
 |---|---|---|
 | GET | `/api/requests` | 分页。参数：`runId` / `targetType` / `targetId` / `onlyFailed` / `page` / `size` |
 | GET | `/api/requests/summary` | 聚合摘要。参数：`runId` / `targetType` / `targetId` / `onlyFailed`（**没有分页参数**） |
+| GET | `/api/requests/{id}` | 单条完整现场：URL 参数 / 请求头（skey 掩码）/ 原始 body / HTTP 状态 / 该 run 的步骤日志 |
+| POST | `/api/requests/replay` | 回放（可编辑请求）：入参 `{url, requestHeaders}`，按提交的 URL 与头用最原始 HTTP 重发，返回 url / 参数 / 请求头（掩码）/ 状态 / 耗时 / 响应 synckey / body 原文；**不写审计** |
 
 - 排序固定：`createdAt` **倒序** + `_id` 升序兜底
 - 分页归一化：`page < 1 → 1`、`size` 默认 20、上限 200
@@ -93,9 +106,45 @@ RequestAuditController ──► AuditService(Impl) ──► ApiRequestQueryRep
    两处各拼一遍条件，拼错了**不报错、只会静默算少**；而「列表说 259 条、摘要说 261 次」
    这种对不上的数字，会直接毁掉这一页的可信度。
 
+8. **回放不写审计。** 它是诊断动作：记进去会让「这个目标被采了多少次」的口径
+   混进人工重发的次数。回放的 HTTP 异常也**不抛到接口层** —— 装进
+   `ReplayResult.errorMsg` 原样展示给用户；但**书单凭证缺项会抛**
+   （`requireBooklistComplete` → `IllegalStateException` → 服务层转 `BizException.warn`），
+   因为带着残凭证回放出来的结果毫无意义。
+
+9. **回放的 skey：真值照用，掩码/空才替换。** 弹窗 skey 行预填当前凭证的**明文**
+   （凭证接口本来就明文回显），可改成 Postman 那把 —— 这样回放才可能「完全复刻 Postman」。
+   规则（`RequestReplayer#resolveHeaders`）：提交值非空且**不含 `****`** → 照用；
+   掩码 / 空 → 用当前内存凭证（书单域名缺 skey 行时补上）。
+   ⚠️ **掩码值绝不发出去**是底线：历史上这里一律替换，导致「库里 skey ≠ Postman skey」
+   时请求根本不是同一个（用户实测「回放没有 bookInfo、Postman 有」的元凶之一）。
+   来源要**回给界面自证**：`resolveHeaders` 返回 `Resolved{headers, skeyFrom}`，
+   `skeyFrom` = `SUBMITTED`（用了提交值）/ `CREDENTIAL`（被替换）/ `null`（未发），
+   前端「实际发送」区直接显示 —— 别让用户只能靠猜。
+
+10. **回放要给出「形状一行指纹」。** `ReplayResult.shapeHint`（`RequestReplayer#probe`）把
+   「为什么没有 bookInfo」压成一句：`错误信封：errcode=…` / `books[0] 无 bookInfo（拍平形态），
+   元素键=[…]` / `books[0] 带 bookInfo（完整形状）`。书单 body 可达 90 万字符，让人翻
+   `books[0]` 太费眼。⚠️ 它只**读** body（body 仍原文返回），是**诊断提示不是解析** ——
+   解析口径仍在 `WereadPage` / `BookParser`，改那边不用改这里。
+
+11. **JDK 会静默丢弃受限头，必须暴露。** `HttpURLConnection` 把
+   `Connection` / `Host` / `Content-Length` / `Origin` / `Via` / `Upgrade` 当受限头丢掉，
+   **不报错、不提示**；审计快照里恰好带 `Connection: keep-alive`，每次回放都会少它。
+   所以 `fillResponse` 逐个 `conn.getRequestProperty()` 回读，丢掉的写进
+   `ReplayResult.droppedHeaders`，前端黄条提示 —— 「提交的头 ≠ 发出的头」这件事
+   不能让用户自己猜。
+
+12. **URL 是唯一真相，后端不单独收 params。** 弹窗的「参数」行是 URL query 的
+    可编辑视图（改行 → 前端重建 query 回写 URL；改 URL → 前端重新解析出行）。
+    入参见 `ReplayRequest`，只有 url + requestHeaders 两个字段 ——
+    收两份必然出现「不一致时听谁的」的歧义。
+
 ## 7. 依赖与耦合
 
-- **依赖**：`common.{PageResult,ResultBean}`、`util.PageQueryUtil`、`collector.dto.{WereadPage,WereadRawResponse}`。
+- **依赖**：`common.{PageResult,ResultBean}`、`util.PageQueryUtil`、`collector.dto.{WereadPage,WereadRawResponse}`；
+  回放链路还依赖 `credential.WereadCredentialStore`（当前内存凭证）+ `config.WereadProperties`
+  （connect/read 超时与 Referer）+ `collector.WereadHeaders`（头的唯一构造处，skey 掩码）。
 - **被依赖**：`collector.CollectLoop`（写）、`stats`（数 `requestTotal`）。
 - ⚠️ `audit ← collector.dto` 与 `collector → audit.repository` 构成**已知的环**，
   设计层面耦合，本轮不解决。

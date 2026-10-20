@@ -21,7 +21,7 @@ const appStore = useAppStore()
   <div class="sidebar">
     <div class="logo" :class="{ collapsed: appStore.sidebarCollapsed }">
       <el-icon class="logo-icon"><Notebook /></el-icon>
-      <span v-show="!appStore.sidebarCollapsed" class="logo-text">微信读书采集</span>
+      <span v-show="!appStore.sidebarCollapsed" class="logo-text">图书采集</span>
     </div>
 
     <el-scrollbar class="menu-scroll">

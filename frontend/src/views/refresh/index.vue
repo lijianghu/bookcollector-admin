@@ -7,6 +7,8 @@ import { dash, formatDateTime, formatNumber } from '@/utils/format'
 import {
   REFRESH_STATUS_LABEL,
   REFRESH_STATUS_TAG,
+  targetTypeLabel,
+  targetTypeTag,
   type RefreshDetail,
   type RefreshJobVO,
   type RefreshStatus,
@@ -310,7 +312,7 @@ onUnmounted(stopPoll)
         <el-tag
           v-for="t in targets"
           :key="`${t.type}:${t.targetId}`"
-          :type="t.type === 'RANKING' ? 'warning' : 'primary'"
+          :type="targetTypeTag(t.type)"
           effect="plain"
           class="target-tag"
         >
@@ -366,7 +368,7 @@ onUnmounted(stopPoll)
         <el-table-column label="目标" min-width="170" show-overflow-tooltip>
           <template #default="{ row }">
             <el-tag size="small" effect="plain" class="type-tag">
-              {{ row.targetType === 'RANKING' ? '榜单' : '分类' }}
+              {{ targetTypeLabel(row.targetType) }}
             </el-tag>
             {{ row.targetName ?? dash(row.targetId) }}
           </template>

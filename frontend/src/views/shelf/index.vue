@@ -316,7 +316,7 @@ onBeforeUnmount(() => {
     <!-- ================= 顶部 ================= -->
     <header class="head">
       <div class="head-main">
-        <h1>我的私人图书馆</h1>
+        <h1>我的书架</h1>
         <p class="tagline">在书架之间，发现下一个值得探索的世界</p>
       </div>
       <div class="head-stats">

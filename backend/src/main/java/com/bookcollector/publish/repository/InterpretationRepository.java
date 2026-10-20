@@ -3,13 +3,16 @@ package com.bookcollector.publish.repository;
 import com.bookcollector.common.PageResult;
 import com.bookcollector.publish.entity.Interpretation;
 import com.bookcollector.publish.entity.PublishStatus;
+import com.bookcollector.publish.req.CandidateBuildRequest;
 import com.bookcollector.publish.req.InterpretationQuery;
 import com.bookcollector.util.PageQueryUtil;
+import com.bookcollector.util.RegexUtil;
 
 import com.mongodb.bulk.BulkWriteResult;
 import org.bson.Document;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.BulkOperations;
 import org.springframework.data.mongodb.core.MongoTemplate;
@@ -71,6 +74,19 @@ public class InterpretationRepository {
      * 池子越大越随机、查询越贵；100 条是纯索引扫描，开销可忽略。
      */
     private static final int PICK_POOL_SIZE = 100;
+
+    /**
+     * 精选预览的排序：推荐值降序 → 评价人数降序 → {@code _id} 升序。
+     *
+     * <p>前两项决定「好书排前面」；最后一项是<b>必须</b>的兜底 ——
+     * 同分的一大批书（榜单里很常见）只按前两项排序时，翻页会出现重复行 / 漏行。
+     *
+     * <p>写法与 {@link #page(InterpretationQuery)} 里的 {@code and(...)} 链一致：
+     * 两级不同方向的排序必须能表达，所以不用单字段重载。
+     */
+    private static final Sort CANDIDATE_SORT = Sort.by(Sort.Direction.DESC, "newRating")
+            .and(Sort.by(Sort.Direction.DESC, "newRatingCount"))
+            .and(Sort.by(Sort.Direction.ASC, "_id"));
 
     private final MongoTemplate mongoTemplate;
 
@@ -191,6 +207,168 @@ public class InterpretationRepository {
     }
 
     // ==================================================================
+    // 精选配置：从图书库按条件挑书（2026-10-12 新增）
+    // ==================================================================
+
+    /**
+     * 精选预览分页：按「精选配置」的条件从 {@code books} 里查，<b>只读不写</b>。
+     *
+     * <h3>为什么不用 {@code PageQueryUtil}</h3>
+     * 那个工具走的是 {@code mongoTemplate.find(query, clazz)} —— 集合名由实体上的
+     * {@code @Document} 推导。这里的目标是 {@code books} 集合配 {@code Document.class}，
+     * 推导出来会是 {@code document} 集合（错），所以必须显式带集合名。
+     * 归一化口径仍复用它的 {@code normalizePage} / {@code normalizeSize}，
+     * 保证与全项目的分页口径一致。
+     *
+     * <p>⚠️ 条件里 {@code title} / {@code author} 是<b>未锚定正则</b>，
+     * 用不上索引（同 {@code BookQuery} 的口径，代价已知并接受）。
+     *
+     * @return 元素是 {@code books} 的<b>原始 BSON 文档</b>，由 Service 转
+     *         {@code CandidateBookVO}（那里只取需要的 8 个字段）
+     */
+    public PageResult<Document> pageCandidateBooks(CandidateBuildRequest req, Integer pageNum, Integer pageSize) {
+        int page = PageQueryUtil.normalizePage(pageNum);
+        int size = PageQueryUtil.normalizeSize(pageSize);
+
+        Query q = new Query(buildCandidateCriteria(req));
+        // 先 count（此时还没加 skip/limit），为 0 直接返回空页，省一次 find
+        long total = mongoTemplate.count(q, BOOKS_COLLECTION);
+        if (total == 0L) {
+            return PageResult.empty(page, size);
+        }
+        q.with(CANDIDATE_SORT).with(PageRequest.of(page - 1, size));
+        List<Document> list = mongoTemplate.find(q, Document.class, BOOKS_COLLECTION);
+        return PageResult.of(list, total, page, size);
+    }
+
+    /**
+     * 流式扫描「全部精选」命中的书，返回原始 BSON 文档。
+     *
+     * <p>与 {@link #streamCandidates(Collection, Collection, int)} 同样的取舍：
+     * 命中几千本时一次性 find 到内存会有几 MB 的 {@code intro} 文本，
+     * 而且必须等全部查完才能开始写、进度条会长时间卡在 0。
+     *
+     * <p>⚠️ 调用方<b>必须</b>在 finally 里关闭返回的迭代器。
+     */
+    public CloseableIterator<Document> streamCandidateBooks(CandidateBuildRequest req) {
+        return mongoTemplate.stream(new Query(buildCandidateCriteria(req)),
+                Document.class, BOOKS_COLLECTION);
+    }
+
+    /**
+     * 按 {@code bookId} 批量取图书库原始文档（「批量精选」用）。
+     *
+     * <p>勾选的是<b>当页</b>的行，数量在一页之内（≤200），但这里仍按
+     * {@link #IN_QUERY_CHUNK} 分片 —— 与 {@link #deleteByBookIds(Collection)} 同形，
+     * 免得以后「跨页全选」把它撑大。
+     *
+     * @return 命中的原始文档。请求里有 bookId 已不在图书库时，返回条数会少于请求条数
+     */
+    public List<Document> findBooksByIds(Collection<String> bookIds) {
+        List<Document> out = new ArrayList<Document>();
+        if (bookIds == null || bookIds.isEmpty()) {
+            return out;
+        }
+        List<String> all = new ArrayList<String>();
+        for (String id : bookIds) {
+            if (id != null && !id.trim().isEmpty()) {
+                all.add(id.trim());
+            }
+        }
+        if (all.isEmpty()) {
+            return out;
+        }
+        for (int i = 0; i < all.size(); i += IN_QUERY_CHUNK) {
+            List<String> chunk = all.subList(i, Math.min(i + IN_QUERY_CHUNK, all.size()));
+            out.addAll(mongoTemplate.find(Query.query(Criteria.where("bookId").in(chunk)),
+                    Document.class, BOOKS_COLLECTION));
+        }
+        return out;
+    }
+
+    /**
+     * 把「精选配置」的条件翻译成 {@code books} 上的 {@code Criteria}。
+     *
+     * <p>同 {@link #buildCriteria(InterpretationQuery)}：用 {@code andOperator} 组合
+     * 而不是连续 {@code query.addCriteria(...)} —— 后者在同一字段上叠加条件时会被覆盖。
+     *
+     * <h3>🔴 两个类型敏感的字段</h3>
+     * <ul>
+     *   <li>{@code categories.categoryId} 在库里是 <b>int</b>，所以入参必须是
+     *       {@code List<Integer>}（字符串会恒不匹配、静默返回 0 条，见
+     *       {@link #streamCandidates} 的注释）；</li>
+     *   <li>{@code newRating} 库里是 <b>0~1000</b>，而 {@link CandidateBuildRequest}
+     *       收的是百分制 —— 换算在请求体里做（{@code resolveMinRatingValue()}），
+     *       这里拿到的已经是库值。</li>
+     * </ul>
+     *
+     * <h3>「隐藏已精选」的实现</h3>
+     * 走 {@code bookId $nin 已有 bookId 列表}，即<b>应用层关联</b>而不是
+     * {@code $lookup} 聚合。取舍：
+     * <ul>
+     *   <li>好处是「预览分页」和「全部精选的流式扫描」可以共用同一个 {@code Criteria}，
+     *       不用为聚合再写一套分页 + count；</li>
+     *   <li>代价是每次查询都要先把清单里的 bookId 全捞一遍。</li>
+     * </ul>
+     *
+     * <p>⚠️ <b>2026-10-13 实测（清单已 11766 条）：<u>不要</u>改成 {@code $lookup}。</b>
+     * 同一组条件（一级分类全选 + 推荐值 ≥ 800）下：
+     * <ul>
+     *   <li>{@code $nin}：count <b>266 ms</b> + find20 <b>225 ms</b>（另加捞 bookId 约 88 ms）；</li>
+     *   <li>{@code $lookup}（先 {@code $match} 再 join，已是较优写法）：count <b>3627 ms</b>
+     *       —— 约 <b>7 倍慢</b>。原因：{@code $lookup} 要按驱动集合逐条 join，
+     *       而且<b>挡住了索引排序</b>，只能在内存里排 1.8 万条。</li>
+     * </ul>
+     * 而 {@code $nin} 的数组 11766 个 bookId ≈ <b>227 KB</b>（命令上限 16 MB，
+     * Mongo 对 {@code $nin} 会建哈希集）—— 它<b>不是</b>瓶颈。
+     * 真正的瓶颈是<b>全表扫描 + 内存排序</b>（{@link #CANDIDATE_SORT} 没有对应复合索引，
+     * explain 显示 docsExamined = 51577）。
+     * 要优化请往「加 {@code {newRating:-1, newRatingCount:-1, _id:1}} 复合索引」与
+     * 「{@link #listExistingBookIds()} 换成 {@code distinct}」两个方向走。
+     */
+    private Criteria buildCandidateCriteria(CandidateBuildRequest req) {
+        List<Criteria> conds = new ArrayList<Criteria>();
+        if (req == null) {
+            return new Criteria();
+        }
+
+        List<Integer> categoryIds = req.resolveCategoryIds();
+        if (!categoryIds.isEmpty()) {
+            conds.add(Criteria.where("categories.categoryId").in(categoryIds));
+        }
+        List<String> ratingTitles = req.resolveRatingTitles();
+        if (!ratingTitles.isEmpty()) {
+            conds.add(Criteria.where("newRatingTitle").in(ratingTitles));
+        }
+        Integer minRating = req.resolveMinRatingValue();
+        if (minRating != null) {
+            conds.add(Criteria.where("newRating").gte(minRating));
+        }
+        Pattern title = RegexUtil.contains(req.resolveTitle());
+        if (title != null) {
+            conds.add(Criteria.where("title").regex(title));
+        }
+        Pattern author = RegexUtil.contains(req.resolveAuthor());
+        if (author != null) {
+            conds.add(Criteria.where("author").regex(author));
+        }
+        if (req.excludeCollected()) {
+            List<String> collected = listExistingBookIds();
+            if (!collected.isEmpty()) {
+                conds.add(Criteria.where("bookId").nin(collected));
+            }
+        }
+
+        if (conds.isEmpty()) {
+            return new Criteria();
+        }
+        if (conds.size() == 1) {
+            return conds.get(0);
+        }
+        return new Criteria().andOperator(conds.toArray(new Criteria[0]));
+    }
+
+    // ==================================================================
     // 挑书
     // ==================================================================
 
@@ -218,10 +396,19 @@ public class InterpretationRepository {
      * <p>⚠️ 随机的范围是<b>池内</b>，不是全库：池子永远是「评价人数最多的前
      * {@value #PICK_POOL_SIZE} 本 PENDING」。
      *
-     * @return 清单为空时返回 {@code null}，由 Service 给出「请先初始化候选」的提示
+     * <p>🔴 2026-10-19：新增 {@code categoryIds} 过滤 —— 只从「发布范围」
+     * （{@code pick_taxonomy_config} 里 enabled=true 的一级分类）里挑。
+     * 传空集合 = 没有可发布范围，直接返回 {@code null}（由 Service 给出提示）。
+     *
+     * @param categoryIds 发布范围的一级分类 id（{@code categories[].categoryId}）
+     * @return 清单为空 / 范围为空时返回 {@code null}，由 Service 给出提示
      */
-    public Interpretation pickOnePending() {
-        Query q = Query.query(Criteria.where("status").is(PublishStatus.PENDING.name()))
+    public Interpretation pickOnePending(List<Integer> categoryIds) {
+        if (categoryIds == null || categoryIds.isEmpty()) {
+            return null;
+        }
+        Query q = Query.query(Criteria.where("status").is(PublishStatus.PENDING.name())
+                        .and("categories.categoryId").in(categoryIds))
                 .with(Sort.by(Sort.Direction.DESC, "newRatingCount")
                         .and(Sort.by(Sort.Direction.ASC, "_id")))
                 .limit(PICK_POOL_SIZE);
@@ -280,8 +467,30 @@ public class InterpretationRepository {
      * </ul>
      */
     public boolean resetToPending(String bookId) {
+        return resetStatus(bookId, PublishStatus.PENDING);
+    }
+
+    /**
+     * 把某条记录的状态改成指定值（2026-10-16 由「重置」按钮演化成「重置为」：
+     * 除待解读外，还允许手工标记成已发布）。
+     *
+     * <p>🔴 只允许 {@link PublishStatus#PENDING} / {@link PublishStatus#PUBLISHED}
+     * 两个取值 —— 白名单在 {@code PublishService#resetTo} 里校验，这里是最后一道闸。
+     * 不给 {@code GENERATING} 是因为「生成中」必须由挑书流程设置（它有 handle、
+     * 会被 {@code job} 轮询推进），手设即成假死；不给 {@code FAILED} 是因为失败
+     * 必须带 {@code errorMsg}，否则页面上「失败原因」一列讲不出故事。
+     *
+     * <p>{@code errorMsg} 无条件清空：两个目标状态都没有「失败原因」这个说法 ——
+     * 尤其 {@code FAILED → PUBLISHED} 时，留着失败原因会让行里同时显示
+     * 「已发布」和一条错误，自相矛盾。
+     *
+     * <p>⚠️ 不碰时间字段（{@code finishedAt} / {@code publishedAt} 等）：
+     * 标记成「已发布」不等于真的发过一篇 —— 那只是清单状态的修正，
+     * 写一个假时间进去会污染「最近发布」这类统计。
+     */
+    public boolean resetStatus(String bookId, PublishStatus status) {
         Update u = new Update()
-                .set("status", PublishStatus.PENDING.name())
+                .set("status", status.name())
                 .set("errorMsg", null)
                 .set("updatedAt", new java.util.Date());
         return mongoTemplate.updateFirst(
@@ -309,17 +518,26 @@ public class InterpretationRepository {
     /**
      * 清单分页。<b>不含正文</b> —— 正文由 Service 转 {@code InterpretationVO} 时自然被丢掉。
      *
-     * <h3>排序：评价人数降序 + {@code _id} 兜底</h3>
-     * 与挑书时的池子排序一致，用户看到的清单顺序和「谁会被先解读」是同一个方向。
-     * {@code _id} 兜底是必须的：评价人数相同的一大批书（榜单里很常见）只按它排序，
-     * 翻页会出现重复行 / 漏行。
+     * <h3>排序：由查询条件指定，{@code _id} 兜底</h3>
+     * 用户 2026-10-13 要求 6 个字段都能正反序排（推荐值 / 评价人数 / 阅读人数 /
+     * 好评数 / 中评数 / 差评数），<b>默认推荐值降序</b>。
+     * 字段白名单与方向解析在 {@link InterpretationQuery#resolveSortPath()} /
+     * {@link InterpretationQuery#resolveAsc()}（那里保证了「永远返回一个可用路径」）。
+     *
+     * <p>⚠️ {@code _id} 升序兜底是<b>必须</b>的：同值的一大批书（榜单里很常见）
+     * 只按主字段排序时，翻页会出现重复行 / 漏行。
+     *
+     * <p>⚠️ 这已经<b>不再</b>与挑书时的池子排序（{@code newRatingCount} 降序）一致 ——
+     * 那是有意的：清单是给人看的，用户要「先看好书」；挑书是给机器用的，
+     * 要「先从评价人数多的里挑」。两者不必同向。
      *
      * <p>⚠️ 筛选条件里 {@code title} / {@code author} 是<b>未锚定正则</b>，
      * 用不上索引（见 {@link InterpretationQuery} 类注释）。清单只有几千条，可接受。
      */
     public PageResult<Interpretation> page(InterpretationQuery q) {
         InterpretationQuery query = q == null ? new InterpretationQuery() : q;
-        Sort sort = Sort.by(Sort.Direction.DESC, "newRatingCount")
+        Sort sort = Sort.by(query.resolveAsc() ? Sort.Direction.ASC : Sort.Direction.DESC,
+                        query.resolveSortPath())
                 .and(Sort.by(Sort.Direction.ASC, "_id"));
         return PageQueryUtil.getPageResult(mongoTemplate, query.getSafePage(), query.getSafeSize(),
                 buildCriteria(query), Interpretation.class, sort);
@@ -331,9 +549,10 @@ public class InterpretationRepository {
      * <p>同 {@code BookRepository.buildCriteria}：用 {@code andOperator} 组合而不是
      * 连续 {@code query.addCriteria(...)} —— 后者在同一字段上叠加条件时会被覆盖。
      *
-     * <p>⚠️ {@code categories.categoryId} 与 {@code readingCount} / {@code publishTime}
-     * 这些字段<b>没有</b>声明在 {@code Interpretation} 实体里（实体只声明程序要用的字段），
-     * 但它们是快照文档里真实存在的键，所以直接按原始路径查是对的。
+     * <p>⚠️ {@code categories.categoryId} / {@code categories.subCategoryId} /
+     * {@code publishTime} 这些字段<b>没有</b>声明在 {@code Interpretation} 实体里
+     * （实体只声明程序要用的字段），但它们是快照文档里真实存在的键，
+     * 所以直接按原始路径查是对的。（{@code readingCount} 2026-10-13 已加进实体 —— 列表要展示它。）
      */
     private Criteria buildCriteria(InterpretationQuery q) {
         List<Criteria> conds = new ArrayList<Criteria>();
@@ -352,6 +571,10 @@ public class InterpretationRepository {
         }
         if (q.getCategoryId() != null) {
             conds.add(Criteria.where("categories.categoryId").is(q.getCategoryId()));
+        }
+        // 二级分类（2026-10-13）。与一级**互斥** —— 级联框只会发其中一个（同图书库）
+        if (q.getSubCategoryId() != null) {
+            conds.add(Criteria.where("categories.subCategoryId").is(q.getSubCategoryId()));
         }
         if (q.getMinRating() != null) {
             conds.add(Criteria.where("newRating").gte(q.getMinRating()));
@@ -433,18 +656,31 @@ public class InterpretationRepository {
     /**
      * 清单里现有的全部 {@code bookId}。
      *
-     * <p>⚠️ 当前实现<b>不用</b>它做去重（去重交给 {@code $setOnInsert} + {@code uk_bookId}），
-     * 留着是给「初始化前的预检」这类场景用的。只取 {@code bookId} 一个字段，
-     * 几千条也只有几十 KB。
+     * <p>用途：「隐藏已精选」把它拼成 {@code bookId $nin ...}（见
+     * {@link #buildCandidateCriteria}）。⚠️ 它<b>不是</b>用来去重的 ——
+     * 去重交给 {@code $setOnInsert} + {@code uk_bookId}。
+     *
+     * <h3>🔴 为什么用 {@code distinct} 而不是 {@code find} + 投影（2026-10-13 改）</h3>
+     * 旧实现是 {@code mongoTemplate.find(q, Interpretation.class)} 再逐个取 {@code bookId}：
+     * 清单 1.1 万条时，Spring Data 会把 1.1 万个文档**映射成实体对象**（绝大部分字段是 null），
+     * 只为了最后扔掉、只留一个字符串。{@code distinct} 在服务端直接出值，
+     * 不经过实体映射这一层。
+     *
+     * <p>⚠️ 顺带把旧的 {@code Sort.by(bookId ASC)} 去掉了 —— {@code $nin} 的语义与顺序无关，
+     * 排序纯属白花代价。**不要为了「以后可能要排序」把它加回来。**
+     *
+     * <p>⚠️ 返回前仍过滤掉 null / 空串：{@code distinct} 会把 {@code bookId} 缺失的
+     * 脏数据也算成一个 {@code null} 值，直接塞进 {@code $nin} 没有意义。
      */
     public List<String> listExistingBookIds() {
-        Query q = new Query().with(Sort.by(Sort.Direction.ASC, "bookId"));
-        q.fields().include("bookId");
-        List<Interpretation> list = mongoTemplate.find(q, Interpretation.class);
+        List<String> distinct = mongoTemplate.findDistinct(
+                new Query(), "bookId", Interpretation.class, String.class);
         List<String> ids = new ArrayList<String>();
-        for (Interpretation it : list) {
-            if (it.getBookId() != null) {
-                ids.add(it.getBookId());
+        if (distinct != null) {
+            for (String id : distinct) {
+                if (id != null && !id.trim().isEmpty()) {
+                    ids.add(id);
+                }
             }
         }
         return ids;

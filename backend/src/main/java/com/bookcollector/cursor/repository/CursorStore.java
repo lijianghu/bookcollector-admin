@@ -17,7 +17,7 @@ import java.util.List;
  * 采集游标的读写。
  *
  * <h3>游标到底是什么</h3>
- * 微信读书这个接口用 {@code maxIndex} 分页，而 {@code maxIndex} 的取值是
+ * 阅读平台这个接口用 {@code maxIndex} 分页，而 {@code maxIndex} 的取值是
  * <b>本页最后一条记录的 {@code searchIdx}</b>。所以游标不是一个页码，
  * 是一个整数序号（文学分类实测第一页最后一条的 {@code searchIdx} = 20）。
  *

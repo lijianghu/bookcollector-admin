@@ -4,6 +4,7 @@ import type {
   Book,
   BookQuery,
   BookUpdateRequest,
+  EnrichResult,
   PageResult,
 } from '@/types'
 
@@ -81,5 +82,30 @@ export function batchDeleteBooks(bookIds: string[]) {
     url: '/books/batch-delete',
     method: 'post',
     data: { bookIds },
+  })
+}
+
+/**
+ * 完善书籍信息（2026-10-16）—— **提交即返回，不等它跑完**。
+ *
+ * 把书单链路漏掉的「简介 / 分类」以及一批原来没建模的字段，用 `/book/info` 逐本补齐。
+ * 一页最多 200 本、5 并发 + 每请求随机等 1~5 秒，可能要几分钟；同步等会被网关掐断。
+ * 所以提交后拿返回的快照开始轮询 {@link getEnrichProgress}。
+ *
+ * 两种失败直接返回 code=400（拦截器已弹提示）：`bookIds` 为空、已有补齐在跑。
+ */
+export function enrichBooks(bookIds: string[]) {
+  return request<EnrichResult>({
+    url: '/books/enrich',
+    method: 'post',
+    data: { bookIds },
+  })
+}
+
+/** 完善书籍信息的进度快照。没跑过时返回一份「全零、未运行」的对象 */
+export function getEnrichProgress() {
+  return request<EnrichResult>({
+    url: '/books/enrich/progress',
+    method: 'get',
   })
 }

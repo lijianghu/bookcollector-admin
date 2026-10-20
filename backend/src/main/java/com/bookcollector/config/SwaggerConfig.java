@@ -35,7 +35,7 @@ public class SwaggerConfig {
     public OpenAPI bookCollectorOpenAPI() {
         return new OpenAPI()
                 .info(new Info()
-                        .title("微信读书图书采集后台 API")
+                        .title("图书采集后台 API")
                         .description("第一期：图书库 / 分类配置 / 采集任务 / 断点续传游标 / 仪表盘统计 / 请求审计。"
                                 + "统一返回体为 ResultBean，HTTP 状态码恒为 200，业务结果看 body 里的 code。"
                                 + "除 /api/auth/login 与 /api/ping** 外，所有 /api/** 都需要 token。")

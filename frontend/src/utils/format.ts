@@ -106,7 +106,7 @@ export function dash(value?: string | number | boolean | null): string {
 /**
  * 后端 `Integer` 当布尔用的字段 → 人话。
  *
- * 微信读书接口里大量 `0/1` 表示真假（`finished` / `free` / `ispub` ...），
+ * 平台接口里大量 `0/1` 表示真假（`finished` / `free` / `ispub` ...），
  * 直接显示 0/1 没人看得懂。
  */
 export function flagText(value?: number | null, trueText = '是', falseText = '否'): string {

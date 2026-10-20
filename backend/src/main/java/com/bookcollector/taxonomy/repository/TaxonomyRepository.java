@@ -8,7 +8,10 @@ import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 采集目标字典（{@code taxonomy_config}）的 Mongo 访问。
@@ -55,6 +58,31 @@ public class TaxonomyRepository {
         }
         q.with(Sort.by(Sort.Direction.ASC, "sort").and(Sort.by(Sort.Direction.ASC, "_id")));
         return mongoTemplate.find(q, TaxonomyItem.class);
+    }
+
+    /**
+     * 某类型下所有「已停用」的 code（{@code enabled = false}）。
+     *
+     * <p>用途（用户 2026-10-19）：采集落库前过滤 —— 书命中任一停用分类（一级或二级）
+     * 就不写库。只认显式 {@code false}；{@code null} 不算停用（与 {@code enabledOnly=true}
+     * 的严格口径一致）。
+     *
+     * @return 停用 code 集合；类型为空时返回空集合（不抛异常）
+     */
+    public Set<String> findDisabledCodes(TargetType type) {
+        if (type == null) {
+            return Collections.emptySet();
+        }
+        Query q = Query.query(Criteria.where("type").is(type.name())
+                .and("enabled").is(Boolean.FALSE));
+        q.fields().include("code");
+        Set<String> codes = new HashSet<String>();
+        for (TaxonomyItem item : mongoTemplate.find(q, TaxonomyItem.class)) {
+            if (item.getCode() != null && !item.getCode().trim().isEmpty()) {
+                codes.add(item.getCode().trim());
+            }
+        }
+        return codes;
     }
 
     public TaxonomyItem findById(String id) {

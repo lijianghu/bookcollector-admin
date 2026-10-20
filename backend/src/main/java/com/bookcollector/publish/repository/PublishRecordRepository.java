@@ -67,9 +67,4 @@ public class PublishRecordRepository {
         return PageQueryUtil.getPageResult(mongoTemplate, page, size,
                 new Criteria(), PublishRecord.class, sort);
     }
-
-    /** 记录总数 */
-    public long count() {
-        return mongoTemplate.count(new Query(), PublishRecord.class);
-    }
 }

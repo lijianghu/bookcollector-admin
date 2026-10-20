@@ -92,7 +92,7 @@ onMounted(() => {
     <el-card class="login-card" shadow="always">
       <div class="brand">
         <el-icon class="brand-icon"><Notebook /></el-icon>
-        <h1 class="brand-title">微信读书采集后台</h1>
+        <h1 class="brand-title">图书采集后台</h1>
         <p class="brand-sub">本地单机版 · 图书采集与浏览</p>
       </div>
 

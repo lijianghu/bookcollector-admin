@@ -2,7 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { createTaxonomy, updateTaxonomy } from '@/api/taxonomy'
-import type { TargetType, TaxonomyItem, TaxonomyRequest } from '@/types'
+import { targetTypeLabel, type TaxonomyItem, type TaxonomyRequest, type TaxonomyType } from '@/types'
 
 /**
  * 分类 / 榜单字典项的新建与编辑。
@@ -26,7 +26,8 @@ import type { TargetType, TaxonomyItem, TaxonomyRequest } from '@/types'
 const props = defineProps<{
   modelValue: boolean
   mode: 'create' | 'edit'
-  type: TargetType
+  /** ⚠️ 是 TaxonomyType（只有分类 / 榜单）—— 书单不进字典表 */
+  type: TaxonomyType
   item: TaxonomyItem | null
 }>()
 
@@ -55,7 +56,7 @@ const form = reactive<{
 /** 编辑时的原始值快照，用来只提交改过的字段 */
 let snapshot = { name: '', enabled: true, sort: undefined as number | undefined, remark: '' }
 
-const typeLabel = computed(() => (props.type === 'RANKING' ? '榜单' : '分类'))
+const typeLabel = computed(() => targetTypeLabel(props.type))
 
 const rules: FormRules = {
   code: [{ required: true, message: 'code 不能为空', trigger: 'blur' }],

@@ -14,17 +14,24 @@
 | `controller/BookController` | Controller | 5 个端点，**极薄转发** |
 | `service/BookService` | Service 接口 | 5 个方法（分页/详情/编辑/删除/批量删除） |
 | `service/impl/BookServiceImpl` | Service 实现 | 三条业务规则（404 / 白名单组装 / 删前确认存在） |
+| `service/BookEnrichService` | Service | 「完善书籍信息」（2026-10-16）：用 `/book/info` 逐本补齐，5 并发 + 1~5 秒随机 + `category` 本地派生。**异步**（提交即返回 + 内存快照轮询，照 `BooklistSyncServiceImpl`），进度走 `GET /api/books/enrich/progress` |
 | `repository/BookRepository` | Repository | Mongo 访问：分页、upsert、局部更新、批量删 |
-| `req/BookQuery` | req | 14 个筛选条件 + 排序白名单 + 分页归一化 |
+| `req/BookQuery` | req | 18 个筛选条件（2026-10-16 新增 4 个：`missing` 缺失字段三档 / `booklistId` 书单 / `minTotalWords` 字数下限 / `enriched` 补齐状态）+ 排序白名单 + 分页归一化 |
 | `req/BookUpdateRequest` | req | 编辑请求体（**刻意不含不可改字段**） |
 | `req/BatchDeleteRequest` | req | 批量删除请求体 |
-| `entity/Book` | Entity | 46 个业务字段 + 4 个扩展字段 + 3 个采集元数据；3 个嵌套内部类 |
+| `req/BookEnrichRequest` | req | 「完善书籍信息」请求体（`bookIds`） |
+| `dto/EnrichResult` | dto | 「完善书籍信息」的执行统计 |
+| `entity/Book` | Entity | 46 个业务字段 + 4 个扩展字段 + **50 个 `book/info` 补充字段** + 采集元数据（含 `enrichedAt` = 「补齐试过」的标记）；12 个嵌套内部类 |
 
 **几个容易忘的实现细节**：
 
-- **`Book` 的结构**：`BookCategory` / `RatingDetail` / `MaxFreeInfo` 三个**嵌套内部类**
-  （都 `implements Serializable`）。改字段时注意 `RatingDetail` 里是 `newRating`
-  （0~1000 的推荐值，**原样存**，展示层自己除 10）—— 别在实体上做换算。
+- **`Book` 的结构**：12 个**嵌套内部类**（都 `implements Serializable`）——
+  原有的 `BookCategory` / `RatingDetail` / `MaxFreeInfo` / `BookListRef`，
+  加上 2026-10-16 为 `book/info` 补充字段新增的 `ScoreDetail` / `CopyrightInfo` /
+  `AuthorSeg` / `CoverBoxInfo` / `CoverColor` / `DominateColor` / `SkuInfo` / `ShortTimeRead`。
+  ⚠️ `newRating`（0~1000 的推荐值，**原样存**，展示层自己除 10）是**顶层字段**，
+  **不在** `RatingDetail` 里 —— 后者只有 `{good, fair, poor, recent, title}`。
+  接口的 `ratingDetail`（`one`~`five`）是**另一个**对象，映射到 `ScoreDetail`。
 - **`upsertMany` 用 `bulkOps(BulkMode.UNORDERED)`**：一次网络往返代替上千次。
   **`UNORDERED`** 是有意的 —— 单条失败不该中断整批。
 - **`upsertMany` 的 Update 是手搓的原始 `Document`**（不是 `Update.set(...)` 链）：
@@ -79,15 +86,18 @@ BookController ──► BookService(Impl) ──► BookRepository ──► bo
 
 | 方法 | 路由 | 说明 |
 |---|---|---|
-| GET | `/api/books` | 分页筛选。参数对象直接绑 `BookQuery`（18 个查询条件 = 14 个筛选 + 排序 / 分页） |
+| GET | `/api/books` | 分页筛选。参数对象直接绑 `BookQuery`（22 个查询参数 = 18 个筛选 + 排序 2 + 分页 2） |
 | GET | `/api/books/{bookId}` | 详情（46 业务字段 + 采集元数据） |
 | PUT | `/api/books/{bookId}` | 编辑（**局部更新**，只写请求体里出现的字段） |
 | DELETE | `/api/books/{bookId}` | 单条删除。⚠️ 下次采集到会被重新写入（**删除不是永久拉黑**） |
 | POST | `/api/books/batch-delete` | 批量删除，返回 `requested` + `deleted`（**两者可能不同**） |
+| POST | `/api/books/enrich` | 完善书籍信息（2026-10-16）。**提交即返回**，不等它跑完 |
+| GET | `/api/books/enrich/progress` | 上面的进度快照（内存态，进程重启即归零，不做持久化） |
 
-**筛选条件（14 个）**：`categoryId`（一级分类）/ `subCategoryId`（二级分类）/ `minRating` / `maxRating` /
+**筛选条件（18 个）**：`categoryId`（一级分类）/ `subCategoryId`（二级分类）/ `minRating` / `maxRating` /
 `minReadingCount` / `newRatingTitle` / `targetType` + `targetId`（采集来源）/ `title` / `author` /
-`minPublishTime` / `maxPublishTime` / `minCollectedAt` + `maxCollectedAt`（采集时间）。
+`minPublishTime` / `maxPublishTime` / `minCollectedAt` + `maxCollectedAt`（采集时间）/
+**`missing`** / **`booklistId`** / **`minTotalWords`** / **`enriched`**（最后 4 个是 2026-10-16 新增，见下）。
 
 ⚠️ 2026-10-10 新增 `title` / `minCollectedAt` / `maxCollectedAt`；**2026-10-12 新增 `newRatingTitle` / `subCategoryId`**；
 ⚠️ `categoryId` 与 `subCategoryId` 是 `categories[]` 里的**两个不同的键**（一级 / 二级），**不会同时非空**；
@@ -98,6 +108,20 @@ BookController ──► BookService(Impl) ──► BookRepository ──► bo
 `newRatingTitle` 是**档位文案**精确匹配（`神作` / `好评如潮` / `评分不足` …），与 `minRating` /
 `maxRating` 的**数值**区间是**两回事**；传哨兵 `__NONE__`（`BookQuery.TITLE_NONE`）表示「暂无评级」
 —— 库里 46% 的书没有这个字段，MongoDB 的 `{field: null}` 会同时匹配「值是 null」与「字段不存在」。
+
+**2026-10-16 新增的 4 个**（都为「完善书籍信息」这条链路服务）：
+- `missing`：`CATEGORY` / `INTRO` / `BOTH`（白名单，见 `BookQuery#resolveMissing()`）。
+  ⚠️ 只看 `category`（字符串）**不看** `categories`（数组）—— 已实测「缺 `categories` 的书
+  一定也缺 `category`」（7214 本全落在 26304 本之内），所以不漏书。
+- `booklistId`：匹配 `bookLists.bookListId`（数组任一元素命中即可，不需要 `$elemMatch`）。
+- `minTotalWords`：`totalWords >= N`。⚠️ `totalWords` 来自 `/book/info`，
+  **只有补过的书才有** —— 没补过的会被这个条件排除掉，这是数据决定的。
+- `enriched`：`enrichedAt` 存在 = 被「完善书籍信息」碰过。
+  🔴 存在的理由：**有的书平台本来就没有分类/简介**，补也补不出来；没有这个条件，
+  它们会永远留在「缺失信息」的筛选结果里，用户分不清「还没补」和「补不出来」。
+  真正的「待补清单」= `missing=BOTH` **加上** `enriched=false`。
+  ⚠️ 判据只能是这个**显式标记** —— 实测过「用补齐专属字段（`totalWords` 等）反推」行不通：
+  25889 本待补的书里只有 9 本带这些字段（补成功的书早就离开这个集合了）。
 
 **排序字段白名单**（`BookQuery#resolveSortPath()`）：`newRating`（默认）/ `readingCount` /
 `newRatingCount` / `lastCollectedAt` / `publishTime`。
@@ -116,7 +140,7 @@ BookController ──► BookService(Impl) ──► BookRepository ──► bo
 
 3. **编辑一律「只写传了的字段」。** `BookServiceImpl.update` 用
    `Map<String,Object> sets` + `putIfNotNull` 逐字段 `Update.set`，**绝不**用整本 `save()`。
-   为什么：整本 `save()` 要求前端把 46 个字段一个不落地回传，少传一个那个字段就被写成 null
+   为什么：整本 `save()` 要求前端把全部字段一个不落地回传，少传一个那个字段就被写成 null
    —— 这是「隐式清空」，是最难发现的一类数据损坏。
    一个字段都没传 → 报 `code=warn`「没有需要修改的字段」，不要静默成功。
 

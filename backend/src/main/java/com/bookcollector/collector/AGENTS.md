@@ -1,11 +1,11 @@
 # collector 模块知识
 
 > 包路径：`com.bookcollector.collector` · 最后更新：2026-10-08
-> **本模块是「和微信读书接口打交道」的全部代码。改 `collector/` 前先读第 6、9 节。**
+> **本模块是「和平台接口打交道」的全部代码。改 `collector/` 前先读第 6、9 节。**
 
 ## 1. 这个模块是干什么的
 
-按「目标（分类 / 榜单）+ 起始位置」分页抓取微信读书的图书列表，解析成 `Book`，
+按「目标（分类 / 榜单）+ 起始位置」分页抓取阅读平台的图书列表，解析成 `Book`，
 按 `bookId` 幂等 upsert 进 `books`，并把每一页请求落进 `api_requests` 供事后排查。
 
 它**不知道**「任务」这个概念 —— 它只接收一个 `CollectCommand`（目标 + 起始游标 + 最大页数），
@@ -16,8 +16,8 @@
 | 类 | 角色 | 一句话职责 |
 |---|---|---|
 | `CollectLoop` | 主循环 | **核心**：翻页 → 限速 → 重试 → 解析 → 落库 → 上报，322 行 |
-| `WereadClient` | HTTP 客户端 | 拼 URL + 发请求，返回**不抛异常**的 `WereadRawResponse` |
-| `BookParser` | 解析器 | 微信读书 JSON → `Book`（46 字段并集 + 清洗） |
+| `WereadClient` | HTTP 客户端 | 拼 URL + 发请求，返回**不抛异常**的 `WereadRawResponse`；含 2026-10-16 新增的 `fetchBookInfo`（第 4 种 URL 形态 `/book/info`，补齐用） |
+| `BookParser` | 解析器 | 阅读平台 JSON → `Book`（46 个 BookInfo 业务字段 + 2026-10-16 新增的 50 个 `book/info` 补充字段 + 清洗） |
 | `BookWriter` | 落库 | 分批（500/批）调 `BookRepository.upsertMany` |
 | `SimpleRateLimiter` | 限速器 | 令牌桶，≥1 秒/页 |
 | `ProgressReporter` | 进度上报 | 写 `collect_task_runs` / `collect_task_logs` |
@@ -57,7 +57,7 @@ task.TaskRunner（采集线程）
   CollectLoop.run(cmd)  ◄── 唯一入口
       │
       ├─► WereadClient.buildUrl(type, targetId, maxIndex)
-      ├─► WereadClient.fetchRaw(...) ──► wereadRestTemplate ──► 微信读书
+      ├─► WereadClient.fetchRaw(...) ──► wereadRestTemplate ──► 阅读平台
       │        │                              ▲
       │        │                              └── WereadHeaderInterceptor（注入 Header）
       │        └─► WereadRawResponse { statusCode, body, error }
@@ -130,7 +130,7 @@ WereadRawResponse WereadClient.fetchRaw(TargetType type, String targetId, int ma
 ## 6. 不变量与铁律 ← 改这个模块前必读
 
 1. **`books` 是「历史累计的并集」，不是「当前榜单快照」。**
-   微信读书分类列表按 `readingCount` 排序，**并列时 tie-break 不稳定** ——
+   阅读平台分类列表按 `readingCount` 排序，**并列时 tie-break 不稳定** ——
    实测「文学」前 100 名在**几分钟内**就会换掉一两本，而且是来回抖的。
    - 秒级（同一轮内）：**完全稳定**，同范围两次请求 `bookId` 集合一模一样
    - 分钟级（跨轮）：**会漂移**，边界上有书进出
@@ -191,7 +191,7 @@ tools/mvn8.sh -f backend/pom.xml -o -B test -Dtest=S2PageStabilityIT
 > 🔴 **不要删 `S2PageStabilityIT`** —— 整个幂等性都建立在它之上。
 
 **给「对端异常」写测试的范式**（`CollectRetryFailureIT`）：用 JDK 自带的
-`com.sun.net.httpserver.HttpServer` 起一个假微信读书，通过 `@DynamicPropertySource`
+`com.sun.net.httpserver.HttpServer` 起一个假阅读平台，通过 `@DynamicPropertySource`
 把 `bookcollector.weread.base-url` 指过去：
 
 ```java

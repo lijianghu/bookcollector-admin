@@ -36,7 +36,7 @@ public class PingController {
         data.put("jvm", System.getProperty("java.vm.name"));
         data.put("fileEncoding", System.getProperty("file.encoding"));
         data.put("mdThreadId", MDC.get("threadId"));
-        data.put("chineseTest", "中文编码测试：微信读书采集器");
+        data.put("chineseTest", "中文编码测试：图书采集器");
         return ResultBean.ok(data);
     }
 

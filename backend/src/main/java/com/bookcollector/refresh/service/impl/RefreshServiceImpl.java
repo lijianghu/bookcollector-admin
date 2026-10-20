@@ -348,7 +348,7 @@ public class RefreshServiceImpl implements RefreshService {
             // ---- 全局并发闸门：与 TaskService.launch 同一口径 ----
             // 不检查的话，刷新批次会和用户手动跑着的采集任务并行；
             // 两边各有自己的限速器（SimpleRateLimiter 是 CollectLoop 的实例字段），
-            // 请求频率直接翻倍，有被微信读书限流的风险。
+            // 请求频率直接翻倍，有被阅读平台限流的风险。
             int max = Math.max(1, taskProperties.getMaxConcurrentRuns());
             if (registry.activeCount() >= max) {
                 aborted = true;

@@ -27,17 +27,21 @@ import java.util.Date;
  * 不是「顺手加的」—— 不要再往别的字段上扩散。
  * 转义与编译统一走 {@link com.bookcollector.util.RegexUtil#contains(String)}。
  *
- * <p><b>⚠️ FR-B2 的「字数区间」没有实现</b>：微信读书这个接口返回的
- * {@code bookInfo} 里<b>没有字数字段</b>（已用 {@code books.json} 的 20 本书样本
- * 逐个核对过 43 个键）。没有数据源就没有筛选可言，用阅读人数下限
- * （{@link #minReadingCount}）替代「热度」这个维度。要真做字数，得换接口。
+ * <p><b>⚠️ FR-B2 的「字数区间」原先没实现</b>：采集用的 {@code bookInfo} 里
+ * <b>没有字数字段</b>（已用 {@code books.json} 的 20 本书样本逐个核对过 43 个键），
+ * 当时只能用阅读人数下限（{@link #minReadingCount}）替代「热度」这个维度。
+ *
+ * <p>🔴 <b>2026-10-16 补上了</b>：{@code /book/info} 接口<b>有</b> {@code totalWords}，
+ * 已建模进 {@code Book} 并由「完善书籍信息」回填 —— 于是有了 {@link #minTotalWords}
+ * （{@code >=} 语义）。⚠️ 但只有<b>补过的书</b>才有这个字段，
+ * 没补过的会被「字数 &gt;= N」排除掉，这是数据决定的，不是筛选写错了。
  *
  * <p>所有字段都是<b>与</b>关系（AND）。多个条件之间没有 OR 语义。
  */
 public class BookQuery {
 
-    /** 每页最大条数，防止前端传 size=100000 把服务打爆 */
-    public static final int MAX_SIZE = 200;
+    /** 每页最大条数，防止前端传 size=100000 把服务打爆。2026-10-19：200 → 500（图书库列表需求） */
+    public static final int MAX_SIZE = 500;
 
     /** 默认每页条数 */
     public static final int DEFAULT_SIZE = 20;
@@ -50,7 +54,7 @@ public class BookQuery {
      *
      * <p>为什么不复用空串：本项目约定<b>空串 = 不筛这一项</b>（见 {@code blankToNull}），
      * 用空串就表达不了「专门找没有评价标题的书」。所以取一个不可能与真实档位撞车的值 ——
-     * 微信读书的档位都是中文词，不会出现下划线。
+     * 阅读平台的档位都是中文词，不会出现下划线。
      */
     public static final String TITLE_NONE = "__NONE__";
 
@@ -84,7 +88,7 @@ public class BookQuery {
     /**
      * 按<b>评价标题</b>精确筛（顶层 {@code newRatingTitle}）。2026-10-12 新增。
      *
-     * <p>取值是微信读书给的<b>档位文案</b>，形如 {@code "神作"} / {@code "好评如潮"} /
+     * <p>取值是阅读平台给的<b>档位文案</b>，形如 {@code "神作"} / {@code "好评如潮"} /
      * {@code "评分不足"}。🔴 与 {@link #minRating} / {@link #maxRating} 是<b>两回事</b>：
      * 那两个筛的是<b>数值</b>（{@code newRating} 0~1000），这个筛的是<b>档位文案</b>。
      *
@@ -146,6 +150,79 @@ public class BookQuery {
      * 而这种少数据是<b>静默</b>的，看不出来。见 {@link #resolveMaxCollectedAt()}。
      */
     private String maxCollectedAt;
+
+    /**
+     * 按<b>书单</b>筛：匹配 {@code bookLists.bookListId}。2026-10-16 新增。
+     *
+     * <p>{@code bookLists} 是 {@code $addToSet} 累加的子文档数组，MongoDB 对
+     * {@code array.field: value} 的语义正是「数组里有任一元素该字段等于 value」，
+     * 所以一条 {@code is} 就够，不需要 {@code $elemMatch}
+     * （同 {@code BookRepository#pageByBooklistId} 的写法）。
+     *
+     * <p>与其它筛选条件是 <b>AND</b> 关系。空/空白 = 不筛这一项。
+     */
+    private String booklistId;
+
+    /**
+     * 字数下限（含）。2026-10-16 新增。匹配顶层 {@code totalWords}（整数）。
+     *
+     * <p>⚠️ {@code totalWords} 是 2026-10-16 才建模的字段（来自 {@code /book/info}）——
+     * 在此之前采集的书<b>没有</b>这个字段，「字数 &gt;= N」会把它们全部排除。
+     * 这是「没有数据就没法比较」的必然结果，不是 bug。
+     */
+    private Integer minTotalWords;
+
+    /**
+     * 按「有没有被『完善书籍信息』碰过」筛。2026-10-16 新增。
+     *
+     * <p>匹配 {@code enrichedAt}（Date）：{@code true} = 补过（字段存在且非 null）；
+     * {@code false} = 从没补过。{@code null} / 不传 = 不筛这一项。
+     *
+     * <p>🔴 存在的理由（用户 2026-10-16 提的场景）：<b>有的书平台本来就没有分类和简介</b>，
+     * 补也补不出来。没有这个条件的话，这些书会永远留在「缺失信息」的筛选结果里，
+     * 用户分不清「还没补」和「补不出来」。
+     * 真正的「待补清单」= {@code missing=BOTH} <b>加上</b> {@code enriched=false}。
+     *
+     * <p>⚠️ 判据只能是 {@code enrichedAt} 这个显式标记 —— 已实测过「用补齐专属字段
+     * （{@code totalWords} 等）反推」行不通：25889 本待补的书里只有 9 本带这些字段。
+     */
+    private Boolean enriched;
+
+    /**
+     * 按「是否付费精选」筛（2026-10-20）。
+     *
+     * <p>匹配 {@code paidCollect}（Integer，{@code 1} = 是）：
+     * {@code true} = 只筛付费精选；{@code false} = 排除付费精选（含字段不存在）；
+     * {@code null} / 不传 = 不筛这一项。
+     */
+    private Boolean paidCollect;
+
+    /**
+     * 按「缺哪个字段」筛：{@code CATEGORY} / {@code INTRO} / {@code BOTH}。2026-10-16 新增。
+     *
+     * <p>用途：书单链路（{@code booklist/single} 的拍平形态）不带 {@code intro} /
+     * {@code category}，采进来的书这两项是空的，需要在图书库里筛出来批量补齐
+     * （「完善书籍信息」按钮）。
+     *
+     * <p>🔴 为什么分成三档（用户 2026-10-16 追加）：<b>有些书本身就没有分类</b>
+     * （平台没给它打标签），补齐也补不出来 —— 如果只有一个「无分类」档，
+     * 这些书会永远留在筛选结果里，用户没法判断「是还没补，还是根本补不出来」。
+     * 加「无简介」「无分类&amp;无简介」两档后就能区分开。
+     *
+     * <p>口径：
+     * <ul>
+     *   <li>{@code CATEGORY} —— 只看 {@code category} 缺失（空 / null / 不存在）</li>
+     *   <li>{@code INTRO} —— 只看 {@code intro} 缺失</li>
+     *   <li>{@code BOTH} —— 两个都缺</li>
+     * </ul>
+     *
+     * <p>⚠️ {@code category} 是<b>字符串</b>字段，不是 {@code categories}（数组）。
+     * 已用库里真实数据核对：缺 {@code categories} 的书<b>一定</b>也缺 {@code category}
+     * （「缺 categories 但 category 有值」= 0 本），所以按 {@code category} 筛不会漏书。
+     *
+     * <p>传 {@code null} / 不传 / 认不出的值 = 不筛这一项。
+     */
+    private String missing;
 
     /** 排序字段。可选值见 {@link #resolveSortPath()}，非法值回退到评分 */
     private String sortField = "newRating";
@@ -245,6 +322,32 @@ public class BookQuery {
      */
     public String resolveNewRatingTitle() {
         return blankToNull(newRatingTitle);
+    }
+
+    /**
+     * 「缺哪个字段」筛选项归一化。
+     *
+     * <p>只认 {@code CATEGORY} / {@code INTRO} / {@code BOTH}（大小写不敏感）；
+     * 其余（含 null / 空白）一律返回 {@code null} = <b>不筛这一项</b>。
+     *
+     * <p>走白名单而不是直接把字符串拼进查询，理由同 {@link #resolveSortPath()}：
+     * 认不出的值既不能静默变成「筛 0 条」，也不能被当成合法条件拼进去。
+     */
+    public String resolveMissing() {
+        String v = blankToNull(missing);
+        if (v == null) {
+            return null;
+        }
+        String upper = v.toUpperCase();
+        if ("CATEGORY".equals(upper) || "INTRO".equals(upper) || "BOTH".equals(upper)) {
+            return upper;
+        }
+        return null;
+    }
+
+    /** 书单 ID。空白串归一成 null（= 不筛这一项） */
+    public String resolveBooklistId() {
+        return blankToNull(booklistId);
     }
 
     /** 出版时间下限。空白串归一成 null */
@@ -450,6 +553,46 @@ public class BookQuery {
 
     public void setMaxCollectedAt(String maxCollectedAt) {
         this.maxCollectedAt = maxCollectedAt;
+    }
+
+    public String getMissing() {
+        return missing;
+    }
+
+    public void setMissing(String missing) {
+        this.missing = missing;
+    }
+
+    public String getBooklistId() {
+        return booklistId;
+    }
+
+    public void setBooklistId(String booklistId) {
+        this.booklistId = booklistId;
+    }
+
+    public Integer getMinTotalWords() {
+        return minTotalWords;
+    }
+
+    public void setMinTotalWords(Integer minTotalWords) {
+        this.minTotalWords = minTotalWords;
+    }
+
+    public Boolean getEnriched() {
+        return enriched;
+    }
+
+    public void setEnriched(Boolean enriched) {
+        this.enriched = enriched;
+    }
+
+    public Boolean getPaidCollect() {
+        return paidCollect;
+    }
+
+    public void setPaidCollect(Boolean paidCollect) {
+        this.paidCollect = paidCollect;
     }
 
     public String getSortField() {

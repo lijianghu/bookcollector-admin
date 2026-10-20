@@ -51,13 +51,65 @@ export const CODE_SESSION_INVALID = 4100
 // 枚举（后端是 String，取值是枚举名）
 // ======================================================================
 
-/** 采集目标类型 */
-export type TargetType = 'CATEGORY' | 'RANKING'
+/**
+ * 采集目标类型。
+ *
+ * ⚠️ 取值是后端 `TargetType` 枚举的**名字**（不是中文 label），接口传的就是它。
+ */
+export type TargetType = 'CATEGORY' | 'RANKING' | 'BOOKLIST'
 
 export const TARGET_TYPE_LABEL: Record<TargetType, string> = {
   CATEGORY: '分类',
   RANKING: '榜单',
+  BOOKLIST: '书单',
 }
+
+/**
+ * 类型标签的取色。
+ *
+ * ⚠️ 与 `TARGET_TYPE_LABEL` 一样是**唯一真相来源** ——
+ * 各页面不要再自己写 `type === 'RANKING' ? 'warning' : 'primary'`。
+ * 那种二元写法在新增类型时**不会报错**，只会把新类型静默按「分类」渲染，
+ * 界面上看不出任何异常。一律走下面的 `targetTypeTag()`。
+ */
+export const TARGET_TYPE_TAG: Record<TargetType, TagType> = {
+  CATEGORY: 'primary',
+  RANKING: 'warning',
+  BOOKLIST: 'success',
+}
+
+/**
+ * 类型标签文案。
+ *
+ * <p>取不到映射时**原样回显**（如脏值 `"FOO"` 显示成 `FOO`），不隐藏异常数据 ——
+ * 显示成「分类」会让一个数据问题看起来像正常状态。
+ */
+export function targetTypeLabel(type?: string | null): string {
+  if (!type) {
+    return '-'
+  }
+  return TARGET_TYPE_LABEL[type as TargetType] ?? type
+}
+
+/** 类型标签取色。取不到时给中性色，同样是「不假装知道」 */
+export function targetTypeTag(type?: string | null): TagType {
+  if (!type) {
+    return 'info'
+  }
+  return TARGET_TYPE_TAG[type as TargetType] ?? 'info'
+}
+
+/**
+ * 字典（分类 / 榜单）的类型。
+ *
+ * ⚠️ 比 {@link TargetType} **少一个 `BOOKLIST`**：书单不进字典表
+ * （它是采集的产物、数量上千，有自己的「书单」模块），
+ * 所以「字典类型」与「采集目标类型」不是一回事。
+ *
+ * <p>收窄成独立的类型，是为了让 `listTaxonomy('BOOKLIST')` 这种调用
+ * **编译不过** —— 否则它会静默去请求 `/taxonomy/categories`，返回一堆分类当书单用。
+ */
+export type TaxonomyType = 'CATEGORY' | 'RANKING'
 
 /**
  * 任务 / 运行状态。
@@ -166,7 +218,16 @@ export interface MaxFreeInfo {
   maxFreeChapterRatio?: number | null
 }
 
-/** 图书。46 个字段，与后端实体一一对应 */
+/**
+ * 图书。
+ *
+ * ⚠️ 这里是**前端用到的字段子集**，不是后端实体的全部 ——
+ * 后端 `Book` 除这 46 个 `BookInfo` 业务字段外，还有 4 个扩展字段、
+ * 以及 2026-10-16 新增的 **50 个 `book/info` 补充字段**（`isbn` / `publisher` /
+ * `totalWords` / `chapterSize` / `star` / `deepLink` / `aiSummary` …）。
+ * 那些字段目前**没有 UI 展示**，所以这里也没声明；要用时照后端字段名加上即可
+ * （后端零 `@Field`，库字段名 == Java 字段名）。
+ */
 export interface Book {
   /** MongoDB 主键 */
   id?: string | null
@@ -241,6 +302,8 @@ export interface Book {
   lastCollectedAt?: string | null
   /** 采集来源列表，形如 ["category:300000", "ranking:rising"] */
   collectSource?: string[] | null
+  /** 付费精选标记（2026-10-20）：1 = 来自付费精选采集；默认 null */
+  paidCollect?: number | null
 }
 
 /** 图书列表查询条件，对应后端 BookQuery 的 17 个参数 */
@@ -261,7 +324,7 @@ export interface BookQuery {
   /**
    * 评价标题（`newRatingTitle`），**精确匹配**。2026-10-12 新增。
    *
-   * 取值是微信读书给的档位文案（`神作` / `好评如潮` / `评分不足` …），
+   * 取值是阅读平台给的档位文案（`神作` / `好评如潮` / `评分不足` …），
    * 候选清单在 `views/book/index.vue` 的 `RATING_TITLE_OPTIONS`（**写死**，刻意不加接口）。
    *
    * ⚠️ 与 `minRating` / `maxRating` 是两回事：那两个筛**数值**（`newRating` 0~1000），
@@ -284,11 +347,60 @@ export interface BookQuery {
   minCollectedAt?: string
   /** 采集时间上限，`yyyy-MM-dd`（本地日期，**含当天整天**，后端补到 23:59:59.999） */
   maxCollectedAt?: string
+  /**
+   * 按书单筛（2026-10-16）。值来自 `GET /api/booklists/options`。
+   *
+   * 后端匹配 `bookLists.bookListId`（书单引用数组，任一元素命中即可）。
+   * 与其它筛选条件是 **AND**。
+   */
+  booklistId?: string
+  /**
+   * 字数下限（含），2026-10-16 新增。匹配 `totalWords`。
+   *
+   * ⚠️ `totalWords` 来自 `/book/info`，只有**补过的书**才有 ——
+   * 没补过的会被「字数 >= N」排除掉，这是数据决定的。
+   */
+  minTotalWords?: number
+  /**
+   * 补齐状态（2026-10-16）。`true` = 补过，`false` = 从没补过，不传 = 不筛这一项。
+   *
+   * 🔴 有的书平台本来就没有分类/简介，补也补不出来。只用 `missing='BOTH'` 筛的话，
+   * 这些书会永远留在结果里，分不清「还没补」还是「补不出来」。
+   * 真正的「待补清单」= `missing='BOTH'` **加上** `enriched=false`。
+   */
+  enriched?: boolean
+  /**
+   * 付费精选（2026-10-20）。`true` = 只要付费精选，`false` = 排除，不传 = 不筛这一项。
+   */
+  paidCollect?: boolean
+  /**
+   * 按「缺哪个字段」筛（2026-10-16）。取值见 `BookMissingField`。
+   *
+   * 用途：筛出书单链路采进来、缺简介与分类的书，配合「完善书籍信息」批量补齐。
+   * 不传 / 认不出的值 = 不筛这一项。
+   */
+  missing?: BookMissingField
   sortField?: BookSortField
   asc?: boolean
   page?: number
   size?: number
 }
+
+/**
+ * 「缺哪个字段」筛选项（图书库，2026-10-16）。
+ *
+ * 为什么要分三档：有些书**本身就没有分类**（平台没给它打标签），补齐也补不出来 ——
+ * 只有一个「无分类」档的话，这些书会永远留在筛选结果里，
+ * 用户分不清「是还没补」还是「根本补不出来」。
+ */
+export type BookMissingField = 'CATEGORY' | 'INTRO' | 'BOTH'
+
+/** 筛选项的下拉候选。后端 `BookQuery.resolveMissing()` 只认这三个值 */
+export const BOOK_MISSING_OPTIONS: Array<{ label: string; value: BookMissingField }> = [
+  { label: '无分类', value: 'CATEGORY' },
+  { label: '无简介', value: 'INTRO' },
+  { label: '无分类&无简介', value: 'BOTH' },
+]
 
 /** 排序字段白名单。后端 `resolveSortPath()` 里不认识的值会 fallback 到 newRating */
 export type BookSortField =
@@ -329,13 +441,131 @@ export interface BatchDeleteResult {
   deleted: number
 }
 
+/**
+ * 书单下拉选项（`GET /api/booklists/options`，2026-10-16）。
+ *
+ * 图书库页的「书单」筛选下拉用。后端只投影这两个字段 ——
+ * 不像 `GET /api/booklists` 那样返回整个书单文档（含简介、头像、计数，228 条能到 1MB 级）。
+ */
+export interface BooklistOption {
+  /** 书单 ID，形如 `391152476_7sKNjWqRN` */
+  booklistId: string
+  /** 书单名称。还没回填时是 null，展示时用 booklistId 兜底 */
+  name?: string | null
+}
+
+/**
+ * 「完善书籍信息」的**进度快照**（`POST /api/books/enrich` 提交、
+ * `GET /api/books/enrich/progress` 轮询）。
+ *
+ * 后端是「提交即返回 + 轮询」：一次补齐可能要几分钟，同步等会被网关/浏览器掐断。
+ * 前端按 `running` 决定要不要继续轮询，用 `processed / requested` 画进度条。
+ *
+ * 各计数**互斥**，每本书只落进一个桶：
+ * `requested = skipped + derived + fetched(updated + failed)`
+ */
+export interface EnrichResult {
+  /** 是否正在跑。前端据此决定按钮禁用与是否继续轮询 */
+  running: boolean
+  /** 状态描述，直接显示在页面上 */
+  message?: string | null
+  /** 开始时间（毫秒时间戳）。从没跑过为 0 */
+  startedAtMs: number
+  /** 结束时间（毫秒时间戳）。运行中为 0 */
+  finishedAtMs: number
+  /** 去重后的入参书数（进度条**分母**） */
+  requested: number
+  /** 已处理完的书数（进度条**分子**） */
+  processed: number
+  /** 需要调 /book/info 的书数（= updated + failed） */
+  fetched: number
+  /** 调接口成功且写库的书数 */
+  updated: number
+  /** 调接口失败的书数 */
+  failed: number
+  /** 未调接口、只本地派生 category 的书数 */
+  derived: number
+  /** 跳过的书数（库里没有 / 不是今天采集的 / 不缺任何字段） */
+  skipped: number
+  /** 总耗时（毫秒） */
+  costMs: number
+}
+
+// ======================================================================
+// 接口凭证（com.bookcollector.credential）
+// ======================================================================
+
+/**
+ * 凭证视图（`GET /api/weread/credential`）。
+ *
+ * <h3>🔴 2026-10-15 起：明文回显（用户亲自定的口径）</h3>
+ * 书单凭证从 3 项扩到 8 项之后，「掩码 + 输入框不回填」的旧口径意味着
+ * 用户改任何一个字段都得把 skey 重输一遍 —— 反而催生
+ * 「复制粘贴到聊天工具」这种更大的泄漏面。
+ * 新口径：表单明文回显、明文保存；敏感值（skey）的防线收敛到
+ * <b>不进注释、不进日志</b>（后端 {@code WereadCredential} 上有
+ * {@code @ToString.Exclude}，日志只打「配了几项 / 缺哪几项」）。
+ *
+ * <h3>⚠️ synckey 是只读展示，没有输入框</h3>
+ * 用户拍板「自动生成吧，这个不用配置了」，当晚又定了取值口径：
+ * 「不是从 root.synckey 取，而是后端 new Date() 的秒值」—— 后端在每次
+ * 书单请求发出前按本地时间生成。VO 里的 {@link synckey} 是<b>最近一次
+ * 请求用的值</b>，只为在表单下方显示，并可与请求审计对照。
+ */
+export interface WereadCredentialVO {
+  /** 登录态 skey（明文，供回显） */
+  skey?: string | null
+  /** 最近一次书单请求使用的 synckey（后端按请求时刻本地时间生成，只读展示）。书单 URL 不带它 → 响应拍平、缺 bookInfo 与 intro */
+  synckey?: string | null
+  /** App 端请求头 channelid */
+  channelid?: string | null
+  /** App 端请求头 vid（与 skey 同一账号） */
+  vid?: string | null
+  /** App 端请求头 priority */
+  priority?: string | null
+  /** App 端请求头 accept-language */
+  acceptLanguage?: string | null
+  /** App 端请求头 basever（客户端版本号） */
+  basever?: string | null
+  /** App 端请求头 v（客户端版本号，与 basever 同值） */
+  v?: string | null
+  /** 书单接口的基础地址（页面上的 sUrl） */
+  booklistUrl?: string | null
+  /** 分类 / 榜单接口的基础地址 */
+  listUrl?: string | null
+  /** 书单链路是否可用（八项凭证全配了） */
+  booklistReady: boolean
+  updatedAt?: string | null
+}
+
+/**
+ * 保存凭证请求。
+ *
+ * 🔴 2026-10-15 起：八项书单凭证<b>全量提交</b>，缺任一项后端即拒
+ * （「书单配置信息不完整」）。所以没有「留空 = 不改」的语义了 ——
+ * 表单每次都回显全部字段，照原样提交即可。
+ */
+export interface WereadCredentialRequest {
+  skey?: string
+  channelid?: string
+  vid?: string
+  priority?: string
+  acceptLanguage?: string
+  basever?: string
+  v?: string
+  booklistUrl?: string
+  /** 页面不暴露，留空 = 保持原值 */
+  listUrl?: string
+}
+
 // ======================================================================
 // 字典（com.bookcollector.taxonomy.entity.TaxonomyItem）
 // ======================================================================
 
 export interface TaxonomyItem {
   id?: string | null
-  type: TargetType
+  /** ⚠️ 是 {@link TaxonomyType}（只有分类 / 榜单），不是 TargetType —— 书单不进字典 */
+  type: TaxonomyType
   /** 采集目标的身份。**编辑时不允许修改** */
   code: string
   /** 展示名。二级分类用「一级-二级」形式，如「历史-历史读物」 */
@@ -526,6 +756,17 @@ export interface ApiRequest {
   hasMore?: boolean | null
   resultCount?: number | null
   errorMsg?: string | null
+  /**
+   * URL 上的 query 参数（key→value，原样编码态）。
+   * 2026-10-15 新增字段 —— 历史记录没有，按「没有」处理
+   */
+  queryParams?: Record<string, string> | null
+  /**
+   * 请求头快照。🔴 skey 只会是掩码值（如 `tu****`）—— 后端不存明文登录态
+   */
+  requestHeaders?: Record<string, string> | null
+  /** 返回原始响应 body 原文。后端最长存 8000 字符，超出会截断并拼 "..." */
+  rawResponse?: string | null
   createdAt?: string | null
 }
 
@@ -555,6 +796,80 @@ export interface RequestSummary {
   p95Ms?: number | null
   /** 最慢一次（ms）。同上 */
   maxMs?: number | null
+}
+
+/**
+ * 请求审计详情（`GET /api/requests/{id}`，2026-10-15 新增）。
+ *
+ * 一次请求的**完整现场** + 该次运行的步骤日志 —— 用来判断一次 0 条采集
+ * 是「数据访问问题」（rawResponse 里就没数据）还是「解析问题」（有数据没解析出来）。
+ */
+export interface RequestDetail {
+  /** 审计记录本体（含 queryParams / requestHeaders / rawResponse） */
+  record: ApiRequest
+  /** 该记录所属运行的核心步骤日志，按时间正序；无 runId 时为空数组 */
+  logs: TaskLog[]
+}
+
+/**
+ * 「回放」的请求体（POST /api/requests/replay）。
+ *
+ * 🔴 URL 是唯一真相：弹窗里的「请求参数」行是 URL query 的可编辑视图
+ * （改参数行 → 前端重建 query 回写 URL；改 URL → 前端重新解析出行），
+ * 所以后端不单独收 params —— 收两份必然出现「不一致时听谁的」的歧义。
+ *
+ * ⚠️ requestHeaders.skey 是掩码值：后端对 skey 一律用当前内存凭证的值替换
+ * （书单域名强制替换，其余域名发了也换），绝不会把掩码真发出去。
+ */
+export interface ReplayRequest {
+  /** 这次要发的完整 URL（含 query，弹窗里改过的那份） */
+  url: string
+  /** 请求头（skey 会被后端替换成当前凭证的值） */
+  requestHeaders: Record<string, string>
+}
+
+/**
+ * 「回放」一次请求的结果（POST /api/requests/replay）。
+ *
+ * 🔴 body 是原始 HTTP 响应的**原文**：后端刻意不过 fastjson、不重序列化，
+ * 字节 → UTF-8 解码 → 原样返回。排查时要看的就是「服务端到底发了什么」。
+ *
+ * ⚠️ requestHeaders.skey 是掩码值（与审计记录同一口径）。
+ * statusCode 为 0 = 请求没发出去（网络异常等），此时 errorMsg 有值。
+ * responseSynckey = 本次响应 body 里的 synckey（取不到为 null）——
+ * 与记录里那个「当时的 synckey」是两回事，对照两者能看出数据源推进了没有。
+ */
+export interface ReplayResult {
+  /** 实际发出的 URL（= 提交的那份） */
+  url: string
+  /** 实际发出 URL 的 query 拆解（编码态原样） */
+  queryParams: Record<string, string> | null
+  /** 实际发送的请求头（skey 掩码；提交了真值就发真值，掩码/空则用当前凭证） */
+  requestHeaders: Record<string, string> | null
+  /**
+   * 本次发出的 skey 来自哪里 —— 回答「你额外做了什么」：
+   * - `SUBMITTED` 用了提交的真值（想完全复刻 Postman 时就是这种）
+   * - `CREDENTIAL` 提交的是掩码 / 留空，已替换为当前凭证的 skey
+   * - `null` 本次没发 skey 头
+   */
+  skeyFrom?: string | null
+  /**
+   * 响应形状的**一行指纹** —— 直接回答「为什么没有 bookInfo」：
+   * `错误信封：errcode=-2012（登录超时）` / `书单响应 499 条；books[0] 无 bookInfo（拍平形态），元素键=[…]` /
+   * `书单响应 499 条；books[0] 带 bookInfo（完整形状）`。
+   * 只是诊断提示，body 本身仍是原文。
+   */
+  shapeHint?: string | null
+  /** HTTP 状态码；没发出去时为 0 */
+  statusCode: number
+  /** 耗时（毫秒） */
+  costMs: number
+  /** 本次响应 body 里的 synckey；取不到为 null */
+  responseSynckey?: number | null
+  /** 原始 body 原文；无响应体时为空串 */
+  body: string
+  /** 失败原因（异常摘要）；成功为 null */
+  errorMsg?: string | null
 }
 
 // ======================================================================
@@ -753,6 +1068,21 @@ export interface RefreshConfigRequest {
  */
 export type PublishStatus = 'PENDING' | 'GENERATING' | 'PUBLISHED' | 'FAILED'
 
+/**
+ * 「重置为」下拉里可选的目标状态（2026-10-16 新增）—— **只有这两个**。
+ *
+ * <p>刻意从 `PublishStatus` 里用 `Extract` 抠出来，而不是另写一遍字面量联合：
+ * 以后枚举改了名，这里会跟着报错，不会留一个对不上的影子类型。
+ *
+ * <p>为什么不给 `GENERATING` / `FAILED`（后端也会拒）：
+ * 「生成中」必须由挑书流程设置（它有 job 句柄、会被轮询推进），手设就是假死；
+ * 「失败」必须带 `errorMsg`，光设个状态页面上讲不出故事。
+ */
+export type InterpretationResetTarget = Extract<PublishStatus, 'PENDING' | 'PUBLISHED'>
+
+/** 「重置为」下拉的选项顺序与文案 —— 待解读在前（更常用） */
+export const INTERPRETATION_RESET_TARGETS: InterpretationResetTarget[] = ['PENDING', 'PUBLISHED']
+
 export const PUBLISH_STATUS_LABEL: Record<PublishStatus, string> = {
   PENDING: '待解读',
   GENERATING: '生成中',
@@ -780,7 +1110,7 @@ export interface PublishJobVO {
   /** 下次触发时间。未启用或算不出时为 null */
   nextFireTime?: string | null
 
-  // ---- 分类白名单（只读展示，来自 ai_taxonomy_config，用户自己维护）----
+  // ---- 发布范围（只读展示，来自 pick_taxonomy_config，用户自己维护；发布挑书按它过滤）----
   /** 当前生效的分类名，如 ['文学', '历史'] */
   categoryNames: string[]
   categoryCount: number
@@ -837,6 +1167,17 @@ export interface InterpretationVO {
   /** 推荐值 0~1000（913 = 91.3%） */
   newRating?: number | null
   newRatingCount?: number | null
+  /** 阅读人数（2026-10-13 加） */
+  readingCount?: number | null
+  /**
+   * 好评 / 中评 / 差评数（2026-10-13 加）。
+   *
+   * 来自快照里的 `newRatingDetail.{good,fair,poor}` —— **嵌套路径**，不是顶层字段。
+   * 后端取不到时给 `null`（页面显示「-」）。
+   */
+  goodCount?: number | null
+  fairCount?: number | null
+  poorCount?: number | null
 
   status?: PublishStatus | null
   /** 状态的中文文案，后端已给，前端不用再维护一份映射 */
@@ -851,6 +1192,14 @@ export interface InterpretationVO {
   model?: string | null
   /** 命中的敏感词个数 */
   sensitiveHitCount?: number | null
+  /**
+   * 本次命中的敏感词**原词列表**（2026-10-13 加）。
+   *
+   * ⚠️ 与 `sensitiveHitCount` 是**同一个事实的两种粒度**（个数 = 列表长度）。
+   * 这里只有**最近一次**的：`book_interpretations` 一本书只有一行，状态会被覆盖；
+   * 想看历史每次替换了什么词，去「发布记录」页。
+   */
+  sensitiveHits?: string[] | null
   errorMsg?: string | null
   /** MANUAL / SCHEDULED */
   trigger?: string | null
@@ -863,14 +1212,32 @@ export interface PublishConfigRequest {
 }
 
 /**
+ * 候选清单的**排序字段**白名单（2026-10-13 加）。
+ *
+ * ⚠️ 后端只认这 6 个，其余一律**回落 `newRating`**（不报错）——
+ * 见 `InterpretationQuery.SORT_PATHS`。所以字段名拼错**不会报错**，
+ * 只会表现为「点了表头但排序没生效」。
+ *
+ * ⚠️ 三个「数」在库里是**嵌套路径** `newRatingDetail.{good,fair,poor}`；
+ * 前端传的是这里的 key（`goodCount` 等），key → 路径的映射在后端做。
+ */
+export type InterpretationSortField =
+  | 'newRating'
+  | 'newRatingCount'
+  | 'readingCount'
+  | 'goodCount'
+  | 'fairCount'
+  | 'poorCount'
+
+/**
  * 候选清单的查询条件，对应后端 `InterpretationQuery`。
  *
  * <h3>与 `BookQuery` 的关系</h3>
  * 候选清单是图书库的**完整快照**，所以筛选条件基本一致。刻意**不含**
  * `targetType` / `targetId`（采集来源）—— 在「找出某本书并删掉它」这个场景下没用。
  *
- * ⚠️ `categoryId` 只传**一级分类**的 code：二级分类的 code 是另一个字段，
- * 传进来恒不匹配、静默返回 0 条（与图书库同源的坑）。
+ * ⚠️ 平台分类**两级**（2026-10-13 起）：选一级发 `categoryId`、选到二级发
+ * `subCategoryId`，**两者不会同时有值**（同图书库的级联框口径）。
  */
 export interface InterpretationQuery {
   /** PENDING / GENERATING / PUBLISHED / FAILED，空 = 全部 */
@@ -879,14 +1246,82 @@ export interface InterpretationQuery {
   title?: string
   /** 作者关键词，包含匹配 */
   author?: string
+  /** 一级分类 code（与 `subCategoryId` 互斥） */
   categoryId?: number
+  /** 二级分类 code（与 `categoryId` 互斥）。2026-10-13 加 */
+  subCategoryId?: number
   minRating?: number
   maxRating?: number
   minReadingCount?: number
   minPublishTime?: string
   maxPublishTime?: string
+  /**
+   * 排序字段。不传 → 后端按 `newRating` **降序**（用户 2026-10-13 指定的默认）。
+   *
+   * ⚠️ 后端只认 {@link InterpretationSortField} 那 6 个，其余回落 `newRating`。
+   */
+  sortField?: InterpretationSortField
+  /** 排序方向：`true` = 升序；`false` / 不传 = 降序 */
+  asc?: boolean
   page?: number
   size?: number
+}
+
+/**
+ * 「精选配置」的筛选条件（2026-10-12 新增）。
+ *
+ * `POST /api/publish/candidates/preview`（只看）与 `POST /api/publish/candidates/collect`
+ * （写入候选清单）**共用这一份条件** —— 这样「预览到什么、精选的就是什么」在结构上成立。
+ *
+ * <h3>🔴 推荐值是百分制</h3>
+ * `minRating` 填的是 `0~100`（与列表里显示的「91.3%」同口径），
+ * 库里 `books.newRating` 存的是 `0~1000`。**换算由后端做** ——
+ * 前端换算的话，哪一处忘了乘 10 就会静默筛错一个数量级。
+ */
+export interface CandidateBuildRequest {
+  /**
+   * 平台分类（一级）code 列表，**必填非空**。匹配 `books.categories[].categoryId`。
+   *
+   * ⚠️ 只能传一级分类的 code。二级的是 `subCategoryId`（另一个字段），
+   * 传进来恒不匹配、静默返回 0 条 —— 与图书库同源的坑。
+   */
+  categoryIds?: number[]
+  /** 评价标签（`books.newRatingTitle`），如 `['神作', '好评如潮']` */
+  ratingTitles?: string[]
+  /** 推荐值下限（**百分制 0~100**，含） */
+  minRating?: number
+  /** 书名关键词，包含匹配 */
+  title?: string
+  /** 作者关键词，包含匹配 */
+  author?: string
+  /** 隐藏已精选：把候选清单（`book_interpretations`）里已有的 bookId 排除掉 */
+  excludeCollected?: boolean
+  /** `true` = 全部精选（忽略 `bookIds`，按条件全量写入） */
+  all?: boolean
+  /** 批量精选：当页勾选的 bookId 列表 */
+  bookIds?: string[]
+}
+
+/**
+ * 精选预览的一行 —— 图书库里的书，**尚未**进候选清单。
+ *
+ * ⚠️ 只有 8 个字段：图书库的 `Book` 有 46 个（含几千字的 `intro`），
+ * 预览一页 20 条没必要背那些负载。想看完整信息去图书库页。
+ */
+export interface CandidateBookVO {
+  bookId: string
+  title?: string | null
+  author?: string | null
+  /** 平台分类，如 文学-经典作品 */
+  category?: string | null
+  /** 推荐值 0~1000（913 = 91.3%） */
+  newRating?: number | null
+  /** 评价人数 */
+  newRatingCount?: number | null
+  /** 阅读人数 */
+  readingCount?: number | null
+  /** 评价标签，如 神作 / 好评如潮 */
+  newRatingTitle?: string | null
 }
 
 /**
@@ -917,6 +1352,13 @@ export interface PublishRecord {
   promptTokens?: number | null
   completionTokens?: number | null
   sensitiveHitCount?: number | null
+  /**
+   * 本次命中的敏感词**原词列表**（2026-10-13 加）。
+   *
+   * <p>⚠️ 2026-10-13 之前的记录**没有这个字段**（那时只存了个数）→ `null`。
+   * 「合规替换」列点开弹窗就是靠它列出替换了哪些词。
+   */
+  sensitiveHits?: string[] | null
   /** MANUAL / SCHEDULED */
   trigger?: string | null
 
@@ -1025,4 +1467,291 @@ export interface ReadingListSummary {
   finished: number
   /** 总数。以库为准，不一定等于前三项之和（万一混进非法状态） */
   total: number
+}
+
+// ======================================================================
+// 书单（com.bookcollector.booklist）
+// ======================================================================
+
+/**
+ * 平台分类引用（`booklists.platformCategories[]` 的元素）。
+ *
+ * ⚠️ `categoryId` 是**字符串**，形如 `"200000"` 甚至 `"topic"`。
+ * 与 `BookCategory.categoryId`（**number**）不是一回事 ——
+ * 拿字符串去匹配 int 字段会恒 0 条且不报错，本项目踩过这个坑。
+ */
+export interface BooklistPlatformCategory {
+  /** 分类 ID，字符串。`"topic"` = 主题书单 */
+  categoryId: string
+  /** 分类名，如 `历史` */
+  title?: string | null
+}
+
+/**
+ * 书单的**采书状态**。
+ *
+ * ⚠️ 取值是后端 `BooklistCollectStatus` 枚举的**名字**。刻意**没有** `COLLECTING`：
+ * 「正在采」的唯一真相来源是任务表（`collect_tasks.status`），在书单表再记一份
+ * 会造出「强杀后永远卡在采书中」的死结。
+ */
+export type BooklistCollectStatus = 'PENDING' | 'COLLECTED' | 'FAILED'
+
+export const BOOKLIST_COLLECT_STATUS_LABEL: Record<BooklistCollectStatus, string> = {
+  PENDING: '待采',
+  COLLECTED: '已采',
+  FAILED: '失败',
+}
+
+export const BOOKLIST_COLLECT_STATUS_TAG: Record<BooklistCollectStatus, TagType> = {
+  PENDING: 'info',
+  COLLECTED: 'success',
+  FAILED: 'danger',
+}
+
+/** 采书状态文案。认不出的脏值**原样回显**，不假装是「待采」 */
+export function booklistStatusLabel(status?: string | null): string {
+  if (!status) {
+    return '-'
+  }
+  return BOOKLIST_COLLECT_STATUS_LABEL[status as BooklistCollectStatus] ?? status
+}
+
+/** 采书状态取色。认不出给中性色 */
+export function booklistStatusTag(status?: string | null): TagType {
+  if (!status) {
+    return 'info'
+  }
+  return BOOKLIST_COLLECT_STATUS_TAG[status as BooklistCollectStatus] ?? 'info'
+}
+
+/**
+ * 一张书单（后端集合 `booklists`）。
+ *
+ * <h3>两个写入者，各写各的字段</h3>
+ * - **链路 A**（发现书单）：`name` / `description` / `author*` / 各计数 / 各时间 /
+ *   `platformCategories` / `lastSeenAt`
+ * - **链路 B**（采书）：`collectStatus` / `bookCountCollected` / `lastCollectedAt`
+ *
+ * 所以「同步一次书单」**不会**把 `collectStatus` 冲回 `PENDING`（后端靠 `$setOnInsert` 守住）。
+ */
+export interface Booklist {
+  id?: string | null
+  /** 书单 ID，形如 `352003193_8cKur0WC3`。★ 也是任务的 `targetId` */
+  booklistId: string
+  /**
+   * 书单名。
+   *
+   * ⚠️ **可能为 null / 空串**：用户自己的 124 张「我的书单」由一次性脚本预置，
+   * 那批书单**只有 ID 没有名称**，名称要等链路 B 启动时回填。
+   * 展示一律走 {@link booklistDisplayName}。
+   */
+  name?: string | null
+  description?: string | null
+  /** 创建者 ID。后端是 Long，防止 int 静默溢出 */
+  userVid?: number | null
+  authorName?: string | null
+  authorAvatar?: string | null
+  /**
+   * 书单里有几本书。★ 采集闸门 1（`>= 50`）看它。
+   *
+   * ⚠️ 接口里这个字段叫 `totalCount`，与本表改名过 —— 见后端 `Booklist` 的类注释。
+   */
+  bookCount?: number | null
+  /** 收藏人数。★ 采集闸门 2（`>= 10000`），也是「提前终止」的判据 */
+  collectCount?: number | null
+  likedCount?: number | null
+  shareCount?: number | null
+  /** 创建时间（UTC ISO 字符串，格式化必须过 `new Date()`） */
+  createTime?: string | null
+  updateTime?: string | null
+  lastReadTime?: string | null
+  /** 这张书单出现在哪些平台分类下。同一张书单可能挂在多个分类里 */
+  platformCategories?: BooklistPlatformCategory[] | null
+  /** 采书状态（枚举名）。见 {@link BooklistCollectStatus} */
+  collectStatus?: string | null
+  /** 实际采到几本书。与 `bookCount` 对不上 = 书单被改过或采集时被过滤 */
+  bookCountCollected?: number | null
+  /** 首次发现时间。upsert 时用 `$setOnInsert` 写入，之后不再改 */
+  firstSeenAt?: string | null
+  /** 最近一次被采集链路扫到的时间 */
+  lastSeenAt?: string | null
+  /** 最近一次采书时间（链路 B）。没采过时为 null */
+  lastCollectedAt?: string | null
+}
+
+/** 书单展示名：没有名称时**回退到 ID**（用户明确要求的口径） */
+export function booklistDisplayName(b: { name?: string | null; booklistId: string }): string {
+  const name = b.name?.trim()
+  return name ? name : b.booklistId
+}
+
+/** 是否「还没有名称」= 等待链路 B 启动时回填 */
+export function isBooklistUnnamed(b: { name?: string | null }): boolean {
+  return !b.name || b.name.trim() === ''
+}
+
+/** 书单列表查询条件，对应后端 `BooklistQuery` */
+export interface BooklistQuery {
+  /** 关键词，**同时**匹配 `name` 与 `booklistId`（包含匹配） */
+  keyword?: string
+  /** 平台分类 ID（**字符串**，匹配 `platformCategories[].categoryId`） */
+  categoryId?: string
+  /** 采书状态（枚举名） */
+  collectStatus?: BooklistCollectStatus | ''
+  minCollectCount?: number
+  maxCollectCount?: number
+  minBookCount?: number
+  maxBookCount?: number
+  /** 只看「还没有名称」的（= 等待链路 B 回填） */
+  nameMissing?: boolean
+  sortField?: BooklistSortField
+  asc?: boolean
+  page?: number
+  size?: number
+}
+
+/** 排序字段白名单。后端 `resolveSortPath()` 里不认识的值会 fallback 到 `collectCount` */
+export type BooklistSortField =
+  | 'collectCount'
+  | 'bookCount'
+  | 'bookCountCollected'
+  | 'lastSeenAt'
+  | 'firstSeenAt'
+  | 'lastCollectedAt'
+
+export const BOOKLIST_SORT_OPTIONS: Array<{ label: string; value: BooklistSortField }> = [
+  { label: '收藏人数', value: 'collectCount' },
+  { label: '书单书籍数', value: 'bookCount' },
+  { label: '已采书籍数', value: 'bookCountCollected' },
+  { label: '最近扫到', value: 'lastSeenAt' },
+  { label: '首次发现', value: 'firstSeenAt' },
+  { label: '最近采集', value: 'lastCollectedAt' },
+]
+
+/**
+ * 「同步书单」（链路 A）的进度快照（后端内存快照，不落库）。
+ *
+ * ⚠️ `running` 来自后端**内存**，所以刷新页面之后还能接着轮询，
+ * 不会卡在「执行中」；但进程重启后进度归零。
+ */
+export interface BooklistSyncVO {
+  /** 是否正在跑。前端据此决定按钮禁用与是否继续轮询 */
+  running: boolean
+  /** 本次要遍历的分类总数（**不固定是 16** —— 用户可能只勾了几个） */
+  totalCategories: number
+  /** 已跑完的分类数 */
+  categoriesDone: number
+  /** 当前正在跑的分类 ID。没在跑时为 null */
+  currentCategoryId?: string | null
+  /** 当前正在跑的分类名，如「历史」 */
+  currentCategoryTitle?: string | null
+  /** 已发出的请求页数 */
+  pagesFetched: number
+  /** 扫到的书单条数（含被闸门挡掉的） */
+  booklistsSeen: number
+  /** 入库条数（更新 + 新增） */
+  booklistsSaved: number
+  /** 其中新增条数 */
+  booklistsInserted: number
+  /** 被闸门挡掉的条数（书籍数 < 50，或收藏人数 < 10000） */
+  booklistsSkipped: number
+  /**
+   * 第 1 页就返回空列表的分类数 —— **正常应为 0**。
+   *
+   * 服务端「返回空」与「该分类真的没书单」在结果上一样，所以单列出来：
+   * 非 0 就说明有分类一个书单都没返回，需要去看后端日志（tag / skey / sUrl）。
+   */
+  emptyFirstPageCategories: number
+  /** 当前状态的一句话描述，直接显示在页面上 */
+  message?: string | null
+  /** 本次开始时间（毫秒时间戳，**不是** ISO 字符串） */
+  startedAtMs?: number | null
+  /** 本次结束时间（毫秒时间戳） */
+  finishedAtMs?: number | null
+  /** 失败原因。成功时为 null */
+  errorMsg?: string | null
+}
+
+/**
+ * 「同步某张书单的书籍」（链路 B）的进度快照（2026-10-20）。
+ *
+ * 数据取自该书的采集任务与最近一次运行（TaskRun）；`running` 为 true 时前端继续轮询。
+ */
+export interface BooklistCollectVO {
+  booklistId: string
+  taskId?: string | null
+  runId?: string | null
+  /** TaskStatus 枚举名：PENDING / RUNNING / PAUSED / SUCCESS / FAILED / CANCELED / INTERRUPTED */
+  status: string
+  /** 状态中文名 */
+  statusLabel: string
+  running: boolean
+  pagesDone?: number | null
+  booksSaved?: number | null
+  booksInserted?: number | null
+  booksExcluded?: number | null
+  /** 该目标声明的总书数，用于算进度百分比 */
+  totalCount?: number | null
+  /** ISO 字符串（后端 Date 序列化） */
+  startedAt?: string | null
+  finishedAt?: string | null
+  errorMsg?: string | null
+}
+
+/** 「一键完善书单信息」的进度快照（2026-10-20） */
+export interface BooklistBackfillVO {
+  running: boolean
+  total: number
+  processed: number
+  updated: number
+  failed: number
+  currentBooklistId?: string | null
+  message?: string | null
+  startedAtMs?: number | null
+  finishedAtMs?: number | null
+  errorMsg?: string | null
+}
+
+/**
+ * 同步请求。
+ *
+ * ⚠️ `categoryIds` 不传 / 传空数组 = **全部 16 个分类**。
+ * 传了清单外的 ID 返回 code=400（不是静默忽略）。
+ */
+export interface BooklistSyncRequest {
+  categoryIds?: string[]
+}
+
+// ---------------------------------------------------------------------------
+// 付费精选配置（2026-10-20）
+// ---------------------------------------------------------------------------
+
+/** 付费精选配置的一行：taxonomy_config 一级 + enabled=true 的分类 */
+export interface PaidCategoryVO {
+  /** 分类 code（= filterCategory） */
+  code: string
+  /** 分类名 */
+  name: string
+}
+
+/** 「付费精选」采集的进度快照 */
+export interface PaidCollectVO {
+  running: boolean
+  /** 是否已暂停（暂停时 running 仍为 true） */
+  paused: boolean
+  filterCategory?: string | null
+  filterCategoryName?: string | null
+  totalCount?: number | null
+  /** 已翻页数 */
+  page: number
+  /** 累计解析到的书数 */
+  booksSaved: number
+  /** 新增入库数 */
+  booksInserted: number
+  /** 已存在、只补了来源/标记的数 */
+  booksUpdated: number
+  message?: string | null
+  startedAtMs?: number | null
+  finishedAtMs?: number | null
+  errorMsg?: string | null
 }

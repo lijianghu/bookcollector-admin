@@ -118,6 +118,13 @@ ReadingListController ──► ReadingListService(Impl) ──► ReadingListRe
 9. **参数归一化在 Service 层**：`topCategoryOf()`（截到一级）、`normalizePage()`（`>=1`）、
    `normalizeSize()`（默认 30 / 上限 200）、`resolveStatus()`（校验 + 默认值）。
 
+10. **🔴 快照里**没有**`newRatingTitle`（2026-10-13）。**
+    `ReadingListRepository.SNAPSHOT_FIELDS` 同样只投影 9 个展示字段，
+    `ReadingListBookVO` 也只有这 9 个（+ 状态三件套）。
+    → 前端详情抽屉要展示「评价标题」时，**只能打开抽屉时实时调 `GET /books/{bookId}` 现查**
+    —— 抽屉组件与「我的藏书」**共用**（`views/shelf/components/ShelfBookDrawer.vue`），
+    改一处两个页面一起生效。理由同 `shelf/AGENTS.md` 铁律 9：**不要给快照加字段**。
+
 ## 7. 依赖与耦合
 
 - **依赖**：`MongoTemplate`、`common.BizException` / `common.PageResult`、`util.RegexUtil`、Lombok。

@@ -14,7 +14,7 @@ import java.util.Date;
 /**
  * 采集游标 —— 断点续传的唯一依据。
  *
- * <p><b>游标是什么</b>：微信读书这个接口用 {@code maxIndex} 分页，
+ * <p><b>游标是什么</b>：阅读平台这个接口用 {@code maxIndex} 分页，
  * 而 {@code maxIndex} 的取值是「本页最后一条记录的 {@code searchIdx}」。
  * 所以游标不是页码，是一个整数序号。把它持久化下来，任务中断后就能接着跑。
  *

@@ -115,6 +115,14 @@ ShelfController ──► ShelfService(Impl) ──► ShelfBookRepository ─�
 8. **参数归一化在 Service 层**：`topCategoryOf()`（截到一级，避免「传了但查不到还不报错」）、
    `normalizePage()`（`>=1`）、`normalizeSize()`（默认 30 / 上限 200，防 `size=99999`）。
 
+9. **🔴 快照里**没有**`newRatingTitle`（2026-10-13）。**
+   `ShelfBookRepository.SNAPSHOT_FIELDS` 只投影 9 个展示字段
+   （`bookId title author cover category newRating newRatingCount readingCount intro`），
+   `ShelfBookVO` 也只有这 9 个。
+   → 前端详情抽屉要展示「评价标题」时，**只能打开抽屉时实时调 `GET /books/{bookId}` 现查**
+   （`views/shelf/components/ShelfBookDrawer.vue`，与阅读清单**共用**同一个抽屉）。
+   **不要**顺手给快照加字段 —— 快照的语义是「加入那一刻的值」，加字段就得回填全部历史数据。
+
 ## 7. 依赖与耦合
 
 - **依赖**：`MongoTemplate`、`common.BizException` / `common.PageResult`、`util.RegexUtil`、Lombok。

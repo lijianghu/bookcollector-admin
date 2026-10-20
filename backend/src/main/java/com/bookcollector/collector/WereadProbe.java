@@ -15,7 +15,7 @@ import org.springframework.stereotype.Component;
 /**
  * S0 阶段的风险闸门：探针。
  *
- * <p>用 RestTemplate 打一次真实的微信读书列表接口，把关键信息打出来，
+ * <p>用 RestTemplate 打一次真实的阅读平台列表接口，把关键信息打出来，
  * 用来确认「Java 能不能复现 Python 的请求」。
  *
  * <p>只在 {@code probe} profile 下运行：
@@ -59,7 +59,7 @@ public class WereadProbe implements CommandLineRunner {
 
     private void printHeader() {
         log.info("");
-        log.info("==================== 微信读书接口探针 ====================");
+        log.info("==================== 平台接口探针 ====================");
         log.info("目标：CATEGORY / {}（文学） / maxIndex=0", DEMO_CATEGORY_ID);
         log.info("URL ：{}", client.buildUrl(TargetType.CATEGORY, DEMO_CATEGORY_ID, 0));
     }

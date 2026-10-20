@@ -43,6 +43,16 @@ public class ApiRequestQueryRepository {
     }
 
     /**
+     * 按 ID 取单条 —— 详情页用（2026-10-15 新增）。
+     *
+     * <p>详情要展示完整现场（请求头 / 原始响应 / 参数），所以是「单条全字段」查询，
+     * 不走这里的分页。查不到返回 {@code null}，由上层决定报 404 还是别的。
+     */
+    public ApiRequest findById(String id) {
+        return mongoTemplate.findById(id, ApiRequest.class);
+    }
+
+    /**
      * 分页查询。
      *
      * <p>分页样板（count 短路 / 排序 / skip+limit）统一走 {@link PageQueryUtil}；

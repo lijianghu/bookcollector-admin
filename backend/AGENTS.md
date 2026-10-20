@@ -11,18 +11,18 @@
 
 # 项目概览
 
-`bookcollector-admin` 是微信读书图书采集器的**本地单机可视化后台**，由原来的 Python CLI 脚本重构而来。
+`bookcollector-admin` 是阅读平台图书采集器的**本地单机可视化后台**，由原来的 Python CLI 脚本重构而来。
 
 **定位与形态**
 
-- 本机 Windows 上**单用户**运行的管理后台：按分类 / 榜单采集微信读书图书数据、落库，并提供可视化查询与运维界面。
+- 本机 Windows 上**单用户**运行的管理后台：按分类 / 榜单采集阅读平台图书数据、落库，并提供可视化查询与运维界面。
 - 前后端分离的**单体 Spring Boot 应用** + Vue 3 SPA。无 Docker、无微服务、无注册中心、无网关。
 - 后端端口 `8080`；前端 dev server `5173`；MongoDB `localhost:27017/bookcollector`。
 
 **数据流**
 
 ```
-微信读书接口
+平台接口
    ↓  WereadClient（限速 1 页/秒 + 失败重试 + 自定义 Header）
    ↓  BookParser（接口响应 → Book 实体）
    ↓  BookRepository.upsertMany（按 bookId 幂等批量 upsert）
@@ -67,7 +67,7 @@ collect_task_runs（进度）+ collect_task_logs（日志）
 | `collector` | **采集引擎**：主循环 / 限速 / 重试 / 解析 / 落库 | [`collector/AGENTS.md`](src/main/java/com/bookcollector/collector/AGENTS.md) |
 | `refresh` | **增量配置**：8 个目标的定期**全量重采**（cron / 手动）—— **与「采集任务」是两套东西** | [`refresh/AGENTS.md`](src/main/java/com/bookcollector/refresh/AGENTS.md) |
 | `publish` | **AI 书籍解读**（内容产出侧）：挑一本候选 → AI 写解读 → 落 `docs/` → 发语雀 | [`publish/AGENTS.md`](src/main/java/com/bookcollector/publish/AGENTS.md) |
-| `shelf` | **我的藏书**（原「藏书阁」页）：8 列 × 3 行网格 + 下滑加载；**快照式**存储 | [`shelf/AGENTS.md`](src/main/java/com/bookcollector/shelf/AGENTS.md) |
+| `shelf` | **我的藏书**（原「藏书阁」页）：8 列 × 3 行网格 + 下滑加载 + **书名 / 作者模糊搜索**；**快照式**存储 | [`shelf/AGENTS.md`](src/main/java/com/bookcollector/shelf/AGENTS.md) |
 | `readinglist` | **阅读清单**：想读 / 在读 / 已读；**快照式**存储；与 `shelf` **并列且互不影响** | [`readinglist/AGENTS.md`](src/main/java/com/bookcollector/readinglist/AGENTS.md) |
 | `common` + `config` + `util` + `system` + `setting` | 基础设施（统一返回体、异常、索引初始化、线程池、探针） | [`common/AGENTS.md`](src/main/java/com/bookcollector/common/AGENTS.md) |
 
@@ -82,7 +82,7 @@ collect_task_runs（进度）+ collect_task_logs（日志）
 
 | 集合 | 实体 | 说明 |
 |---|---|---|
-| `books` | `book.entity.Book` | 图书（46 个业务字段 + 采集元数据） |
+| `books` | `book.entity.Book` | 图书（46 个业务字段 + 4 个扩展字段 + 50 个 `book/info` 补充字段 + 采集元数据） |
 | `taxonomy_config` | `taxonomy.entity.TaxonomyItem` | 采集目标字典 |
 | `collect_tasks` | `task.entity.CollectTask` | 采集任务定义 |
 | `collect_task_runs` | `task.entity.TaskRun` | 一次运行记录（含实时进度） |
@@ -127,7 +127,7 @@ collect_task_runs（进度）+ collect_task_logs（日志）
 | `/api/refresh` | `RefreshController` | 增量配置（8 目标全量刷新） |
 | `/api/publish` | `PublishController` | AI 解读：候选清单 / 配置 / 生成并发布 |
 | `/api/publish/records` | `PublishRecordController` | 发布记录 |
-| `/api/shelf` | `ShelfController` | 我的藏书（8 列 × 3 行网格 + 下滑加载） |
+| `/api/shelf` | `ShelfController` | 我的藏书（8 列 × 3 行网格 + 下滑加载 + 书名 / 作者模糊搜索） |
 | `/api/reading-list` | `ReadingListController` | 阅读清单（想读 / 在读 / 已读；与藏书阁互不影响） |
 
 接口文档：`http://localhost:8080/swagger-ui.html`（springdoc，OpenAPI 3）。
@@ -138,7 +138,7 @@ collect_task_runs（进度）+ collect_task_logs（日志）
 # 单元测试（离线，不联网）
 mvn test
 
-# 集成测试（会打真实微信读书接口 / 真实 MongoDB）
+# 集成测试（会打真实平台接口 / 真实 MongoDB）
 mvn test -Dtest=CollectEngineIT
 mvn test -Dtest=TaskControlIT
 mvn test -Dtest=ApiCrudIT

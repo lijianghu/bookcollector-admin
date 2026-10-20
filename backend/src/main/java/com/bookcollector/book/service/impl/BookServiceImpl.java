@@ -54,7 +54,7 @@ public class BookServiceImpl implements BookService {
      * 编辑（FR-B5）。
      *
      * <p>「只写传了的字段」：{@code null} 一律跳过。所以
-     * {@code {"title": "新书名"}} 只会改书名，其余 45 个字段原样不动。
+     * {@code {"title": "新书名"}} 只会改书名，其余字段原样不动。
      *
      * <p>全部字段都是 null（空请求体）时直接报错而不是静默成功 ——
      * 「点保存 → 提示成功 → 什么都没变」是最容易让人怀疑系统的交互。

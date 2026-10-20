@@ -38,6 +38,12 @@ export interface MenuItem {
  *       收进去，**顺序就是用户点名的顺序**（分类 → 任务 → 增量 → 发布）。</li>
  * </ol>
  *
+ * <h3>2026-10-14：配置分组里插入了「书单配置」</h3>
+ * 用户要求「改名叫『书单配置』并放到『配置』分组」，<b>位置没指定</b>。
+ * 这里放在「分类配置」之后 —— 两者都是**采集目标池**（分类来自字典、
+ * 书单来自采集），挨着读起来是一条线：目标池 → 任务 → 调度 → 发布。
+ * 想挪到别处只改本文件 + `router/index.ts` 的路由顺序，没有其它耦合。
+ *
  * <h3>🔴 分组的 `path` 必须与它的子项不同</h3>
  * `AppSidebar` 用 `:index="item.path"` 做菜单项的唯一标识（`el-menu` 靠它高亮与展开）。
  * 若分组也写 `/books`，就和子项「图书库」撞了 index。所以分组用
@@ -98,13 +104,25 @@ export const MENUS: MenuItem[] = [
     path: '/config-group',
     title: '配置',
     icon: 'Setting',
-    desc: '分类 / 任务 / 增量 / 发布 四项配置',
+    desc: '分类 / 书单 / 任务 / 增量 / 发布 / 付费精选 六项配置',
     children: [
       {
         path: '/taxonomy',
         title: '分类配置',
         icon: 'Menu',
         desc: '21 个分类 + 7 个榜单的字典维护（新增 / 编辑 / 启停 / 删除）',
+      },
+      {
+        // 2026-10-14 新增。位置放在「分类配置」之后：两者都是**采集目标池**
+        // （分类是字典里人工维护的，书单是采集来的），紧挨着读起来是一条线：
+        // 目标池 → 任务 → 调度 → 发布。
+        // ⚠️ 改标题要同步改 `router/index.ts` 的 `meta.title`（驱动浏览器标签页）。
+        path: '/booklists',
+        title: '书单配置',
+        // ⚠️ 用 CollectionTag 而不是 Notebook：后者已经被「阅读清单」占了，
+        //    两个菜单项同图标会让人以为是一件事。
+        icon: 'CollectionTag',
+        desc: '书单池：16 个平台分类平铺后一键发现书单（书数 ≥50 且 收藏人数 ≥10000），可筛选 / 分页；是「任务配置」里选书单目标的数据源',
       },
       {
         path: '/tasks',
@@ -124,6 +142,13 @@ export const MENUS: MenuItem[] = [
         icon: 'Promotion',
         desc: '生成配置（cron）、候选池统计、生成并发布到语雀；候选清单与「重置精选」已移到「精选图书」',
       },
+      {
+        // 2026-10-20 新增：按 taxonomy_config 一级分类分页采集付费精选书籍
+        path: '/paid',
+        title: '付费精选配置',
+        icon: 'Star',
+        desc: '按 taxonomy_config 一级分类（enabled=true）分页采集付费精选书籍；已有书籍只补来源与 paidCollect 标记',
+      },
     ],
   },
   {
@@ -142,7 +167,7 @@ export const MENUS: MenuItem[] = [
     path: '/requests',
     title: '请求审计',
     icon: 'Document',
-    desc: '每一次对微信读书接口的 HTTP 请求（状态码 / 耗时 / 总条数 / 是否还有下一页）',
+    desc: '每一次对平台接口的 HTTP 请求（状态码 / 耗时 / 总条数 / 是否还有下一页）',
   },
 ]
 

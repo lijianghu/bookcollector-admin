@@ -1,5 +1,6 @@
 package com.bookcollector.task.service.impl;
 
+import com.bookcollector.booklist.service.BooklistSyncService;
 import com.bookcollector.collector.ProgressReporter;
 import com.bookcollector.common.BizException;
 import com.bookcollector.common.PageResult;
@@ -25,6 +26,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -51,18 +53,28 @@ public class TaskServiceImpl implements TaskService {
     private final ProgressReporter progress;
     private final TaskProperties properties;
 
+    /**
+     * 只用来给「书单」任务回填名称（{@link #backfillBooklistName}）。
+     *
+     * <p>方向是 {@code task → booklist}，单向，没有循环依赖：
+     * {@code booklist} 包只依赖 {@code collector} / {@code config}，不认识任务。
+     */
+    private final BooklistSyncService booklistSyncService;
+
     public TaskServiceImpl(TaskRepository repository,
                            TaskRegistry registry,
                            TaskRunner runner,
                            CursorStore cursorStore,
                            ProgressReporter progress,
-                           TaskProperties properties) {
+                           TaskProperties properties,
+                           BooklistSyncService booklistSyncService) {
         this.repository = repository;
         this.registry = registry;
         this.runner = runner;
         this.cursorStore = cursorStore;
         this.progress = progress;
         this.properties = properties;
+        this.booklistSyncService = booklistSyncService;
     }
 
     // ==================================================================
@@ -421,7 +433,57 @@ public class TaskServiceImpl implements TaskService {
     // ==================================================================
 
     /**
-     * 拉起一次运行。步骤：全局闸门 → 建 run → 抢占目标 → CAS 状态 → 提交线程池。
+     * 书单任务在启动前回填书单名称（{@code start} / {@code retry} / {@code resume} 共用）。
+     *
+     * <h3>为什么要这一步</h3>
+     * 「我的书单」那 124 张是 {@code tools/seed_booklists.py} 按 ID 预置的，
+     * 库里<b>只有 ID、没有名称</b>。用户 2026-10-14 明确要求：
+     * 「任务中点击启动的时候，如果书单只有 id 没有名称，回填更新」。
+     *
+     * <p>回填成功后要同时更新两处：
+     * <ul>
+     *   <li>书单表的 {@code name} —— 由 {@code BooklistSyncService#ensureName} 负责；</li>
+     *   <li>本任务上的 {@code targetName} —— 任务列表显示的就是它，
+     *       不更新的话界面上永远是个 ID。</li>
+     * </ul>
+     *
+     * <h3>🔴 失败一律不抛异常</h3>
+     * 它是启动路上的<b>顺带</b>动作，不是启动的前提：采书本靠 {@code targetId}，
+     * 名称只影响展示。回填失败（网络抖动 / 登录超时）就让任务带着 ID 跑起来。
+     * 所以这里把调用整个包在 try 里 —— {@code ensureName} 自己承诺不抛，
+     * 但一次「启动」不该因为展示信息而失败，这层保护留着。
+     *
+     * <h3>⚠️ 这里刻意不用 {@code TargetType.of()}</h3>
+     * 那个方法对未知类型<b>抛异常</b>，会把这个「展示用」的辅助方法变成
+     * 启动路径上新的失败点，而且失败时机早于全局闸门检查（错误信息会变得不直观）。
+     * 用字符串比较，非书单任务直接返回。
+     */
+    private void applyBooklistName(CollectTask task) {
+        String type = task.getTargetType();
+        if (type == null || !TargetType.BOOKLIST.name().equalsIgnoreCase(type.trim())) {
+            return;
+        }
+        String name;
+        try {
+            name = booklistSyncService.ensureName(task.getTargetId());
+        } catch (RuntimeException e) {
+            log.warn("书单名称回填失败，任务仍按原名称启动：task={} target={}：{}",
+                    task.getId(), task.getTargetId(), e.toString());
+            return;
+        }
+        // 没回填到（接口没给 / 请求失败），或名称没变 —— 都不用写库
+        if (name == null || name.equals(task.getTargetName())) {
+            return;
+        }
+        task.setTargetName(name);
+        repository.updateTaskFields(task.getId(),
+                Collections.<String, Object>singletonMap("targetName", name));
+        log.info("任务 {} 的书单名称已回填为「{}」（target={}）",
+                task.getId(), name, task.getTargetId());
+    }
+
+    /**
+     * 拉起一次运行。步骤：书单名称回填 → 全局闸门 → 建 run → 抢占目标 → CAS 状态 → 提交线程池。
      *
      * <p>任何一步失败都要<b>回滚前面已做的事</b>，否则会留下
      * 「状态是 RUNNING 但没人在跑」的假死记录 —— 那正是最难排查的一类 bug。
@@ -430,6 +492,13 @@ public class TaskServiceImpl implements TaskService {
         String taskId = task.getId();
         String targetType = task.getTargetType();
         String targetId = task.getTargetId();
+
+        // ---- 0. 书单任务：启动前把书单名称回填进来 ----
+        //    ⚠️ 必须在最前面：它可能改 task.targetName，而下面的 label、
+        //       run.targetName、CollectCommand.targetName 用的都是它。
+        //       放这儿也让 start / retry / resume 三条路一致（它们都走 launch）。
+        applyBooklistName(task);
+
         String label = task.getTargetName() == null ? targetId : task.getTargetName();
 
         // ---- 1. 全局并发闸门（对齐 2.5：同时最多 1 个采集任务）----

@@ -10,6 +10,7 @@ import org.springframework.data.mongodb.core.mapping.Document;
 import java.io.Serializable;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 候选清单 + 解读记录（集合 {@code book_interpretations}）。
@@ -85,6 +86,27 @@ public class Interpretation implements Serializable {
 
     /** 评价人数。挑书时按它降序取第一条 */
     private Integer newRatingCount;
+
+    /** 阅读人数（2026-10-13 加：列表展示 + 可排序） */
+    private Integer readingCount;
+
+    /**
+     * 评分详情：{@code {good, fair, poor, recent, title}}（2026-10-13 加）。
+     *
+     * <p>列表要展示「好评数 / 中评数 / 差评数」，就是这里的 {@code good} / {@code fair} / {@code poor}。
+     *
+     * <p>⚠️ 声明成 {@code Map<String, Object>} 而不是一个具体的嵌套类型，有两个原因：
+     * <ol>
+     *   <li>{@code publish} 与 {@code book} 两个包<b>刻意互不 import</b>
+     *       （见 {@code InterpretationQuery} 的类注释），而 {@code RatingDetail}
+     *       定义在 {@code book.entity.Book} 里；</li>
+     *   <li>这个子文档是从 {@code books} 原样快照过来的，<b>可能带 {@code _class}</b>
+     *       （顶层那个被 {@code remove} 了，嵌套的不一定）。用一个同名的本地类型去映射它，
+     *       等于赌 Spring Data 的类型解析行为 —— 而 {@code Map} 没有这个问题。</li>
+     * </ol>
+     * 取用时在 {@code InterpretationVO.from()} 里做安全转换（{@code null} / 非数字都兜住）。
+     */
+    private Map<String, Object> newRatingDetail;
 
     // ------------------------------------------------------------------
     // 解读状态与产物

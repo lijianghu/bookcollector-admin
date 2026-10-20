@@ -1,6 +1,6 @@
 # publish 模块知识
 
-> 包路径：`com.bookcollector.publish` · 最后更新：2026-10-09
+> 包路径：`com.bookcollector.publish` · 最后更新：2026-10-12
 > **这是「内容产出侧」，和前面所有「把数据采回来」的模块性质不同。**
 > 改之前先读第 6 节铁律 1、2、10。
 
@@ -22,7 +22,8 @@ book_interpretations(PENDING)  ──挑一本──►  AiClient(DeepSeek/OpenA
 ### 🔴 它与「采集」侧的关系：**没有关系**
 
 本模块**不依赖** `collector` / `task` / `refresh`，也不碰任何采集游标。
-唯一的交集是：候选清单里的书是**从 `books` 集合快照过来的**（初始化那一步读一次）。
+唯一的交集是：候选清单里的书是**从 `books` 集合快照过来的**（「初始化候选」与
+「精选配置」两步各读一次，后者是**流式**扫全量 —— 见铁律 13）。
 所以定时刷新与定时发布同时跑**不会互相抢锁**，只会抢网络 —— 默认 cron 已刻意错开。
 
 ## 2. 类清单
@@ -33,26 +34,34 @@ book_interpretations(PENDING)  ──挑一本──►  AiClient(DeepSeek/OpenA
 | `PublishScheduler` | 定时触发器 | `SchedulingConfigurer` + 动态 `Trigger`（每次触发前重读 cron） |
 | `client/AiClient` | HTTP 客户端 | 走 **OpenAI 兼容协议**（`POST {baseUrl}/chat/completions`）。**不是 DeepSeek 专用** —— 2026-10-09 从 `DeepSeekClient` 改名 |
 | `client/YuqueClient` | HTTP 客户端 | 语雀 OpenAPI：建文档 + 挂目录节点 |
-| `controller/PublishController` | Controller | 7 个端点，极薄转发 |
+| `controller/PublishController` | Controller | 10 个端点，极薄转发 |
+| `controller/PublishRecordController` | Controller | 发布记录列表，**只有 1 个端点**（`GET /api/publish/records`）。⚠️ 路由前缀是 `/api/publish/records`，**与 `PublishController` 的 `/api/publish` 不同**（刻意不合并，见类注释） |
 | `dto/AiCompletion` | DTO | 一次生成的返回：正文 + token 用量 + model |
 | `dto/YuqueDoc` | DTO | 语雀文档：id / url / title |
 | `entity/Interpretation` | Entity | **候选清单 + 解读记录**（`book_interpretations`）。本模块最核心的实体 |
 | `entity/PublishStatus` | 枚举 | `PENDING` / `GENERATING` / `PUBLISHED` / `FAILED`。**单条记录**的状态 |
 | `entity/PublishJob` | Entity | 单例调度配置（`ai_publish_job`，`_id` 固定 `"default"`）+ 最近一次执行结果 |
+| `entity/PublishRecord` | Entity | 发布**流水**（`publish_record`）：一次发布 = 一行（与候选清单的「一书一行」语义不同）。含 `sensitiveHits` —— 本次命中的敏感词**原词列表**（2026-10-13 加，之前的记录没有） |
 | `entity/AiModel` | Entity | 用户手工维护（`ai_model`），**程序只读**。含 `apiKey` |
 | `entity/AiYuqueToken` | Entity | 用户手工维护（`ai_yuque_token`），**程序只读**。含 `token` |
 | `entity/AiTaxonomyItem` | Entity | 用户手工维护（`ai_taxonomy_config`），**程序只读**。分类白名单 |
 | `entity/SensitiveWord` | Entity | 用户手工维护（`ai_sensitive_words`），**程序只读** |
-| `repository/InterpretationRepository` | Repository | 候选初始化（原始 BSON 快照 upsert）+ 挑书 + 状态流转 + 分页 |
+| `repository/InterpretationRepository` | Repository | 候选初始化（原始 BSON 快照 upsert）+ 挑书 + 状态流转 + 分页（**6 个字段可正反序，默认推荐值降序**）+ **精选配置：按条件查图书库（`books`）** |
 | `repository/PublishJobRepository` | Repository | 单例文档 `loadOrCreate` / `saveConfig` / `markRunning` / `markFinished` |
+| `repository/PublishRecordRepository` | Repository | 发布记录：`insert`（**只插不改**）+ 分页（`publishedAt`↓ → `_id`↓） |
 | `repository/AiConfigRepository` | Repository | 读那三张配置表。**🔴 这个类里永远不许出现 key / token 的内容** |
 | `repository/SensitiveWordRepository` | Repository | 按**词长降序**取启用中的词表 |
 | `prompt/InterpretationPrompt` | 模板 | 提示词（system + user）。**只负责「告诉模型怎么写」，不做校验**（见铁律 2） |
-| `service/PublishService` | Service 接口 | `getJob` / `currentCron` / `pageInterpretations` / `updateConfig` / `initializeCandidates` / `clearCandidates` / `trigger` / `runScheduled` / `resetToPending` |
+| `service/PublishService` | Service 接口 | `getJob` / `currentCron` / `pageInterpretations` / `deleteInterpretations` / `updateConfig` / `previewCandidates` / `collectCandidates` / `initializeCandidates` / `clearCandidates` / `trigger` / `runScheduled` / `resetToPending` |
+| `service/PublishRecordService` | Service 接口 | 发布记录**只读**入口：`page(page, size)`。**刻意不暴露「新增」** —— 那种接口只能用来造假数据；历史补录走脚本 |
 | `service/impl/PublishServiceImpl` | Service 实现 | **本模块的核心**：编排 + 两个独立线程池 + 两个 `AtomicBoolean` 互斥 + 内存进度快照 |
+| `service/impl/PublishRecordServiceImpl` | Service 实现 | 转发 `PublishRecordRepository`，**零业务逻辑** |
 | `req/PublishConfigRequest` | req | 改配置请求体（两字段都可选，`null` = 不改） |
+| `req/InterpretationQuery` | req | 候选清单的查询条件（**不是**精选配置的）。平台分类**两级**：`categoryId`（一级）/ `subCategoryId`（二级），**互斥** —— 级联框只会发其中一个（同图书库口径，2026-10-13 加）。**含排序白名单** `SORT_PATHS`（6 个 key → Mongo 路径，不认识回落推荐值） |
+| `req/CandidateBuildRequest` | req | **精选配置**的筛选条件。预览与精选**共用一份**；推荐值收百分制、换算放后端 |
 | `vo/PublishJobVO` | VO | 页面全量数据（配置 + 脱敏的模型信息 + 两条任务的进度 + 各状态计数） |
-| `vo/InterpretationVO` | VO | 列表行。**刻意不声明** `content` / `rawContent` —— 大字段不进列表接口 |
+| `vo/InterpretationVO` | VO | 列表行。**刻意不声明** `content` / `rawContent` —— 大字段不进列表接口。含 `readingCount` + `goodCount` / `fairCount` / `poorCount`（后三者取自快照的 `newRatingDetail.{good,fair,poor}`，用 `asInt` 宽松取值） |
+| `vo/CandidateBookVO` | VO | **精选预览**的一行。只声明 8 个字段（图书库 `Book` 有 100+ 个字段、含几千字的 `intro`） |
 
 ## 3. 调用关系（图谱）
 
@@ -107,18 +116,33 @@ PublishScheduler ──► PublishService.currentCron() / runScheduled()
 |---|---|---|
 | GET | `/api/publish/job` | 页面全量数据：cron / enabled / 下次触发时间 / 分类白名单 / 模型与语雀配置（**脱敏**）/ 两条任务的进度 / 各状态条数 |
 | PUT | `/api/publish/job` | 改 cron / enabled（都可选）。cron 非法 → `code=400`。**改完立即生效，不用重启** |
-| POST | `/api/publish/candidates/init` | 初始化候选。**提交即返回**，进度看 GET job |
+| POST | `/api/publish/candidates/init` | 初始化候选（**旧入口**：按 `ai_taxonomy_config` 白名单 + 评级档位 + 评价人数下限全量重建）。**提交即返回**，进度看 GET job |
+| POST | `/api/publish/candidates/preview` | **精选预览**（2026-10-12）：按条件从**图书库**查一页，**只读不写**。分页参数走 query |
+| POST | `/api/publish/candidates/collect` | **精选**（2026-10-12）：把符合条件的书快照进候选清单。`all=true` 走全部 / 否则只处理 `bookIds`。**提交即返回**，进度看 GET job |
 | POST | `/api/publish/candidates/clear` | 只删「待解读」，不碰已发布 / 失败 / 生成中 |
-| GET | `/api/publish/interpretations` | 清单分页。`status` 留空 = 全部。**返回不含正文** |
+| GET | `/api/publish/interpretations` | 清单分页。`status` 留空 = 全部；平台分类 `categoryId`（一级）/ `subCategoryId`（二级）**互斥**（同图书库）。**返回不含正文**。排序参数 `sortField` + `asc`（6 个数值列可正反序，默认推荐值降序） |
+| POST | `/api/publish/interpretations/batch-delete` | 批量删除清单条目。⚠️ **不限状态** —— 已发布的也能删（不删语雀文章、不动发布记录） |
 | POST | `/api/publish/interpretations/{bookId}/reset` | 重置为「待解读」 |
 | POST | `/api/publish/trigger` | 生成并发布一本。**提交即返回**；已有任务在跑 → `code=400` |
+| GET | `/api/publish/records` | **发布记录**分页（`PublishRecordController`，`page` / `size`）。⚠️ 路径前缀与上表**不同** —— 走 `/api/publish/records` 而不是 `/api/publish/xxx`。**实体直出**（不套 VO），按 `publishedAt` 倒序 |
 
 鉴权由 `config.WebMvcConfig` 统一拦截 `/api/**` 覆盖，本模块不用声明。
 Swagger 标签：`@Tag(name = "10. AI 书籍解读")`。
 
 前端页面：`frontend/src/views/publish/config/index.vue`（路由 `/publish/config`，菜单「发布配置」，
 **2 秒轮询** `GET /job`）；发布记录页 `frontend/src/views/publish/record/index.vue`
-（路由 `/publish/record`，菜单「发布记录」）；接口封装 `frontend/src/api/publish.ts`
+（路由 `/publish/record`，菜单「发布记录」；`GET /api/publish/records` **实体直出**，
+「合规替换」列可点开弹窗看本次替换了哪些**原词** —— 读 `PublishRecord.sensitiveHits`，
+2026-10-13 之前的记录没有该字段，弹窗里如实说明）；**候选清单页**
+`frontend/src/views/book/featured/index.vue`（路由 `/books/featured`，菜单「图书库 → 精选图书」，
+表格 6 个数值列 `sortable="custom"` 走服务端排序、默认推荐值降序，另有一列「评价标题」**不参与排序**；
+顶部「平台分类」筛选是**两级级联**（2026-10-13，口径照抄图书库：`el-cascader` +
+`checkStrictly` + `checkOnClickNode`，选一级发 `categoryId`、选到二级发 `subCategoryId`；
+⚠️ **刻意不做**图书库那套「期刊杂志 → 出版时间倒序」的排序联动 —— 本页排序白名单里没有 `publishTime`）
++ 它的「精选配置」弹窗 `frontend/src/views/book/featured/ConfigDialog.vue`
+（2026-10-12 新增，调 preview / collect 两个端点，同样 **2 秒轮询** `GET /job`
+跟进 `initRunning / initScanned / initInserted`；⚠️ 弹窗里的平台分类**仍是「一级」单选**，
+未跟着改二级 —— 需求只点了「精选图书」页）；接口封装 `frontend/src/api/publish.ts`
 （原 `api/ai.ts`）。
 
 ## 6. 不变量与铁律 ← 改这个模块前必读
@@ -139,8 +163,9 @@ Swagger 标签：`@Tag(name = "10. AI 书籍解读")`。
    （《小王子》是第一条受害者）；后来连「有 H1 + 8 个 H2 齐全」也一并去掉了。
    **不要把它加回来。** `InterpretationPrompt` 只负责写提示词。
 
-3. **一次执行只做一本，两类操作都是「提交即返回」。**
-   `trigger()` / `initializeCandidates()` 只把任务丢进线程池就返回，
+3. **一次执行只做一本，所有长任务都是「提交即返回」。**
+   `trigger()` / `initializeCandidates()` / `collectCandidates()`（2026-10-12）
+   只把任务丢进线程池就返回，
    前端靠轮询 `getJob()` 跟进。生成一本要 30~120 秒，同步等会让页面卡在请求里、
    还容易被浏览器/网关超时掐断（用户 2026-10-09 明确要求「异步，并可以看到进度」）。
    **两个专用线程池不共用**：共用一个池时，点「生成」会排在几十秒的初始化后面。
@@ -149,6 +174,9 @@ Swagger 标签：`@Tag(name = "10. AI 书籍解读")`。
    `initRunning` / `genRunning`。DB 里的 `GENERATING` 只是**快照**，进程被杀就是假的。
    ⚠️ **启动时不做自动清理**（用户明确要求）→ 残留的 `GENERATING` 靠页面上的
    「重置为待解读」手工捞回。
+   ⚠️ **「精选配置」的 collect 与「初始化候选」共用 `initRunning` 与同一个线程池**
+   —— 两者都在写候选清单，而且进度字段是同一组（`initScanned` / `initInserted`），
+   分开计数会让页面上的数字跳来跳去。
 
 5. **`Trigger.nextExecutionTime()` 绝对不能返回 `null`。**
    同 `refresh/AGENTS.md` 铁律 5：`ReschedulingRunnable` 拿到 null 就不再重排，
@@ -191,8 +219,38 @@ Swagger 标签：`@Tag(name = "10. AI 书籍解读")`。
 
 12. **本地文件名 = `日期_《书名》.md`，同名**覆盖**。**
     书名里的 Windows 非法字符（`\ / : * ? " < > |`）换成下划线
-    —— 微信读书的书名里冒号、斜杠并不罕见，不处理会直接抛 `InvalidPathException`。
+    —— 阅读平台的书名里冒号、斜杠并不罕见，不处理会直接抛 `InvalidPathException`。
     同名覆盖是有意的：同一天对同一本书重新生成，本来就该是「重来一遍」。
+
+13. **「精选配置」的三个口径（2026-10-12 新增）。**
+    - **推荐值收百分制**（`0~100`，与列表里显示的「91.3%」同口径），
+      换算成库值（×10）**在后端做**（`CandidateBuildRequest.resolveMinRatingValue()`）
+      —— 放前端的话，哪一处忘了乘 10 就会**静默筛错一个数量级**。
+    - **「隐藏已精选」走应用层 `$nin`**（先取 `book_interpretations` 的 bookId 列表）
+      而不是 `$lookup` 聚合，为的是让「预览分页」与「全部精选的流式扫描」
+      **共用同一个 `Criteria`**。
+      ⚠️ **2026-10-13 实测（精选已 11766 条）：不要改成 `$lookup`。**
+      同一组条件下 `$nin` 方案 count 266 ms + find20 225 ms，`$lookup` **3627 ms**（≈7 倍慢）
+      —— `$lookup` 要按驱动集合逐条 join，而且**挡住了索引排序**，只能在内存里排 1.8 万条。
+      `$nin` 的数组 11766 个 bookId ≈ **227 KB**（命令上限 16 MB，Mongo 会建哈希集），
+      真正的瓶颈是**全表扫描 + 内存排序**（缺 `CANDIDATE_SORT` 的复合索引），跟 `$nin` 无关。
+      真要优化：先加 `{newRating:-1, newRatingCount:-1, _id:1}` 复合索引，
+      再把 `listExistingBookIds()` 换成 `distinct`（省掉 1.1 万个实体的映射）。
+    - **三套筛选条件互不叠加**（用户 2026-10-12 明确）：点哪个「精选预览」
+      就**只按哪一套**查（评论标题 / 推荐值 / 书名作者）。三套一起叠上去的话，
+      用户勾着 5 个标签又填了推荐值时会得到一堆莫名其妙的结果。
+
+14. **清单排序走白名单，前端传的字段名不能直接拼进 `Sort.by`（2026-10-13 新增）。**
+    `sortField` 来自前端，`InterpretationQuery.SORT_PATHS` 只认 6 个 key
+    （`newRating` / `newRatingCount` / `readingCount` / `goodCount` / `fairCount` / `poorCount`），
+    不认识的一律回落 `newRating`（默认降序）—— 为它报 400 会让「点错一下表头」变成一次报错。
+    - ⚠️ 三个「数」是**嵌套路径** `newRatingDetail.{good,fair,poor}`
+      （该子文档只有 `{good, fair, poor, recent, title}`，**没有** `newRating`）。
+      路径写错 → 静默按不存在的字段排（退化成自然序且不报错），最难查。
+    - 排序必须再挂一个 `_id ASC` 兜底：被排字段同值的行在分页边界上顺序不稳定，
+      会出现「翻页时某条重复出现 / 某条永远看不到」。
+    - **清单排序与挑书池子排序是两回事**：池子用 `CANDIDATE_SORT`（推荐值↓→评价人数↓→`_id`↑），
+      清单用用户点的那一列。刻意不一致，别去「统一」。
 
 ## 7. 依赖与耦合
 
@@ -219,6 +277,9 @@ Swagger 标签：`@Tag(name = "10. AI 书籍解读")`。
 4. 点「立即生成并发布」→ 立刻返回；30~120 秒后状态变「已发布」，
    `docs/` 下出现 `日期_《书名》.md`，语雀「书籍解读」目录出现同名文档
 5. 验收关键点：**清单里那本书的「语雀」列有链接、「完成时间」有值**
+6. **候选清单页排序**（2026-10-13）：点「推荐值 / 评价人数 / 阅读人数 / 好评数 / 中评数 / 差评数」
+   任一表头可正反序；**默认进来应是推荐值降序**（表头箭头指向「推荐值」）；
+   取消排序（表头点第三下）应回到推荐值降序。
    （外部标记进来的那些这两列为空 —— 见铁律 1）
 6. 反例验收：点「立即生成并发布」后**再点一次** → 应返回 `code=400`
 7. 反例验收：把 `ai_model` 的 `enable` 改成 `false` → 应报
@@ -274,9 +335,9 @@ Swagger 标签：`@Tag(name = "10. AI 书籍解读")`。
 
 - **现象**：图省事复用现成的 `RestTemplate` bean → 报错信息读不出来 / 请求被截断 / 泄漏 Header。
 - **根因**：那个 bean 上有三样东西不能带过来 ——
-  ① 挂着 `WereadHeaderInterceptor`，会给**每个**请求注入微信读书的自定义 Header 和 `Cookie`
+  ① 挂着 `WereadHeaderInterceptor`，会给**每个**请求注入阅读平台的自定义 Header 和 `Cookie`
   （发给 AI 服务属于无谓的信息外泄）；
-  ② 超时是「微信读书」的读数，生成一篇要 30~120 秒，用它**必然被截断**；
+  ② 超时是「阅读平台」的读数，生成一篇要 30~120 秒，用它**必然被截断**；
   ③ 错误处理器是包级私有（`RawResponseErrorHandler`），跨包拿不到。
 - **修法**：`AiClient` 自己建一个 `RestTemplate`
   （`HttpComponentsClientHttpRequestFactory` + `NoThrowErrorHandler`）。

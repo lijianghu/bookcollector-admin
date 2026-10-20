@@ -21,7 +21,7 @@ import {
   taskStatusTagType,
   type TaskActionKey,
 } from '@/utils/taskStatus'
-import type { CollectTask } from '@/types'
+import { targetTypeLabel, type CollectTask, type TargetType } from '@/types'
 
 /**
  * 任务配置（S6.3）。
@@ -56,6 +56,24 @@ const stats = computed(() => {
   const active = tasks.value.filter((t) => t.status === 'RUNNING' || t.status === 'PAUSED').length
   return { running, pending, active }
 })
+
+/**
+ * 目标类型筛选。`''` = 全部。
+ *
+ * <h3>为什么在前端筛，不给后端加参数</h3>
+ * `GET /api/tasks` <b>一次返回全量</b>（不分页 —— 一个目标只能有一个任务，
+ * 总量就是分类 + 榜单 + 书单的量级）。既然数据已经在手里，加一个后端查询参数
+ * 只会多一次往返，而且筛选一变化就得重新请求、列表会闪。
+ *
+ * <p>类型取值是后端 `TargetType` 枚举名（`CATEGORY` / `RANKING` / `BOOKLIST`），
+ * 与 `types` 里的 `TARGET_TYPE_LABEL` 同源。
+ */
+const typeFilter = ref<TargetType | ''>('')
+
+/** 应用类型筛选之后的列表 */
+const visibleTasks = computed(() =>
+  typeFilter.value ? tasks.value.filter((t) => t.targetType === typeFilter.value) : tasks.value,
+)
 
 async function load(): Promise<void> {
   loading.value = true
@@ -238,18 +256,29 @@ async function confirmRemove(task: CollectTask): Promise<void> {
   }
 }
 
-onMounted(load)
+// ---------------------------------------------------------------------------
+// 接口凭证（2026-10-15 起挪到「书单配置」页顶部的表单）
+//
+// 原本挂在工具栏右侧那两个输入框（skey / sUrl）。凭证从 3 项扩到 9 项
+// （+ synckey / channelid / vid / priority / acceptLanguage / basever / v）
+// 之后工具栏塞不下，且它服务的是书单链路、不是「任务」这个页面的事 ——
+// 用户要求移到书单配置页并置顶。这一页不再管凭证的读写。
+// ---------------------------------------------------------------------------
+
+onMounted(() => {
+  void load()
+})
 </script>
 
 <template>
   <div class="page">
     <el-card shadow="never" class="table-card">
       <ProTable
-        :data="tasks"
+        :data="visibleTasks"
         :loading="loading"
         :show-pagination="false"
         row-key="id"
-        empty-text="还没有采集任务。点「新建任务」挑一个分类或榜单开始。"
+        empty-text="还没有采集任务。点「新建任务」挑一个分类、榜单或书单开始。"
       >
         <template #toolbar>
           <el-button type="primary" :loading="loading" @click="load">
@@ -260,8 +289,30 @@ onMounted(load)
             <el-icon><Plus /></el-icon>
             新建任务
           </el-button>
+
+          <!--
+            目标类型筛选。放在前端筛（后端一次返回全量，见 typeFilter 的说明），
+            所以点一下是**立即**生效，不会重新请求、列表不闪。
+          -->
+          <el-radio-group v-model="typeFilter" class="type-filter">
+            <el-radio-button value="">全部</el-radio-button>
+            <el-radio-button value="CATEGORY">分类</el-radio-button>
+            <el-radio-button value="RANKING">榜单</el-radio-button>
+            <el-radio-button value="BOOKLIST">书单</el-radio-button>
+          </el-radio-group>
+
+          <!--
+            ⚠️ 接口凭证原来在这一行（skey / sUrl 两个输入框）。
+            2026-10-15 起挪到「书单配置」页顶部表单 —— 凭证扩到九项后工具栏
+            放不下，且它服务书单链路、与「任务」页面无直接关系。
+          -->
+
           <span class="toolbar-info">
-            共 {{ tasks.length }} 个任务 · 运行中 {{ stats.running }} · 待执行 {{ stats.pending }} ·
+            共 {{ visibleTasks.length }} 个任务
+            <template v-if="typeFilter">
+              （已按「{{ targetTypeLabel(typeFilter) }}」筛选，全部 {{ tasks.length }} 个）
+            </template>
+            · 运行中 {{ stats.running }} · 待执行 {{ stats.pending }} ·
             占着目标 {{ stats.active }} 个
           </span>
         </template>
@@ -277,7 +328,7 @@ onMounted(load)
         <el-table-column label="采集目标" min-width="200" show-overflow-tooltip>
           <template #default="{ row }">
             <el-tag size="small" effect="plain" class="type-tag">
-              {{ row.targetType === 'RANKING' ? '榜单' : '分类' }}
+              {{ targetTypeLabel(row.targetType) }}
             </el-tag>
             {{ row.targetName ?? '-' }}
             <span class="text-muted target-id">（{{ row.targetId }}）</span>
@@ -373,6 +424,20 @@ onMounted(load)
   font-size: 12px;
   color: #909399;
 }
+
+/*
+ * 目标类型筛选。⚠️ 必须 flex: 0 0 auto —— 工具栏是 flex 行，
+ * 不加的话 el-radio-group 会被拉伸，按钮组里出现大片空白。
+ */
+.type-filter {
+  flex: 0 0 auto;
+}
+
+/*
+ * ⚠️ 接口凭证（.credential-bar / .credential-skey / …）原来在这一页。
+ * 2026-10-15 起挪到「书单配置」页顶部表单（九项凭证工具栏放不下）。
+ * 样式一并删除，别在这页留残骸。
+ */
 
 .type-tag {
   margin-right: 4px;

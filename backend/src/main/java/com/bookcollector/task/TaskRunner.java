@@ -96,10 +96,13 @@ public class TaskRunner {
                     + "」，最大页数 " + describeMaxPages(task.getMaxPages())
                     + "，起始游标 " + run.getCurrentCursor());
 
+            // 目标类型在这一刻快照 —— 下面还要按它决定「这次要不要碰游标」
+            TargetType targetType = TargetType.of(task.getTargetType());
+
             CollectCommand command = CollectCommand.builder()
                     .runId(runId)
                     .taskId(taskId)
-                    .targetType(TargetType.of(task.getTargetType()))
+                    .targetType(targetType)
                     .targetId(task.getTargetId())
                     .targetName(task.getTargetName())
                     .maxPages(task.getMaxPages())
@@ -111,6 +114,13 @@ public class TaskRunner {
                     // 永远从游标续传。要「从头重采」应该先重置游标（FR-E2），
                     // 而不是让任务自己决定 —— 否则「启动」这个动作的含义就变得不可预测了。
                     .resetCursor(false)
+                    // ★ 书单不分页：接口一次返回整张书单（上限 500 本），
+                    //   压根没有 maxIndex 这个概念。让它去写游标，只会在「断点续传」页
+                    //   留下一条恒为 0、永远显示「采集中」的假记录，而且书单的游标
+                    //   与「按 maxIndex 续传」的语义完全对不上。
+                    //   CollectLoop 已经支持 skipCursor（定时刷新任务走的就是它），
+                    //   这里只是把「哪些类型该跳过」说清楚。
+                    .skipCursor(!targetType.isList())
                     .control(handle)
                     .build();
 

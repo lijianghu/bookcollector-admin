@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * {@link BookParser} 的回归测试 —— 用 20 本<b>真实</b>样本逐字段核对。
  *
- * <p>样本是原 Python 项目留下的 {@code books.json}（微信读书「文学」分类第一页的原始响应，
+ * <p>样本是原 Python 项目留下的 {@code books.json}（阅读平台「文学」分类第一页的原始响应，
  * 20 条记录），拷到 {@code src/test/resources/} 作为基准。
  *
  * <h3>这个测试在防什么</h3>

@@ -4,17 +4,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
 /**
- * 微信读书接口相关配置。对应 application.yml 的 {@code bookcollector.weread.*}。
+ * 平台接口相关配置。对应 application.yml 的 {@code bookcollector.weread.*}。
  */
 @Component
 @ConfigurationProperties(prefix = "bookcollector.weread")
 public class WereadProperties {
-
-    /** 列表接口基础地址 */
-    private String baseUrl = "https://weread.qq.com/web/bookListInCategory";
-
-    /** Referer，微信读书会校验 */
-    private String referer = "https://weread.qq.com/";
 
     /** 连接超时（毫秒） */
     private int connectTimeout = 10_000;
@@ -30,22 +24,6 @@ public class WereadProperties {
 
     /** 是否启用请求审计落库 */
     private boolean auditEnabled = true;
-
-    public String getBaseUrl() {
-        return baseUrl;
-    }
-
-    public void setBaseUrl(String baseUrl) {
-        this.baseUrl = baseUrl;
-    }
-
-    public String getReferer() {
-        return referer;
-    }
-
-    public void setReferer(String referer) {
-        this.referer = referer;
-    }
 
     public int getConnectTimeout() {
         return connectTimeout;

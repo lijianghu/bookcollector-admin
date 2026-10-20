@@ -4,7 +4,6 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   batchDeleteInterpretations,
   getPublishJob,
-  initCandidates,
   pageInterpretations,
   resetInterpretation,
 } from '@/api/publish'
@@ -12,11 +11,15 @@ import { listTaxonomy } from '@/api/taxonomy'
 import ProTable from '@/components/ProTable.vue'
 import SearchForm from '@/components/SearchForm.vue'
 import BookActionMenu from '@/components/BookActionMenu.vue'
+import ConfigDialog from './ConfigDialog.vue'
 import { useBookActions } from '@/composables/useBookActions'
 import { dash, formatDateTime, formatNumber } from '@/utils/format'
 import {
+  INTERPRETATION_RESET_TARGETS,
   PUBLISH_STATUS_LABEL,
   PUBLISH_STATUS_TAG,
+  type InterpretationResetTarget,
+  type InterpretationSortField,
   type InterpretationVO,
   type PublishStatus,
   type TaxonomyItem,
@@ -33,9 +36,17 @@ import {
  * <p>拆出来之后挂到「图书库 → 精选图书」，因为它本质上是「从图书库里挑出来的
  * 高质量子集」，而不是发布流水线上的一个环节。
  *
- * <h3>数据源与接口完全没变</h3>
- * 仍是 `book_interpretations`，仍用 `GET /api/publish/interpretations` 等三个端点 ——
- * 后端 `publish` 模块**一行没改**，只是换了个页面来调。
+ * <h3>数据源没变，但接口早已不止「三个端点」</h3>
+ * 数据源仍是 `book_interpretations`，列表仍是 `GET /api/publish/interpretations`。
+ * ⚠️ 这段原文写的是「后端 `publish` 模块**一行没改**」—— **已过时**：
+ * 2026-10-12 加了「精选配置」的 `POST /candidates/preview` / `collect`（端点 8 → 10），
+ * 2026-10-13 又给列表加了服务端排序（`sortField` + `asc`）。
+ * 本页已是 `publish` 模块的主要调用方，改它之前先看 `publish/AGENTS.md`。
+ *
+ * <h3>2026-10-13：6 个数值列可正反序排（默认推荐值降序）</h3>
+ * 排序是**服务端**做的（`sortable="custom"` + `@sort-change` → `sortField` / `asc`），
+ * 字段名过 `InterpretationQuery` 的白名单（不认识 → 回落推荐值）。
+ * 本页**没有**程序化改排序的场景，所以不像图书库那样需要「换 key 重建表格」。
  *
  * <h3>2026-10-12：操作列加了「藏书 / 阅读清单」</h3>
  * 需求要求四个列表页（图书库 / 精选图书 / 我的藏书 / 阅读清单）都能做同样五个动作。
@@ -55,6 +66,55 @@ const size = ref(20)
 const selectedRows = ref<InterpretationVO[]>([])
 const deleting = ref(false)
 
+// ---------------------------------------------------------------------------
+// 「合规替换」明细弹窗（2026-10-13）
+//
+// 那一列原来只显示「N 词」，看不到**替换了什么**。数据来自
+// `InterpretationVO.sensitiveHits`（命中的**原词**列表）。
+// ⚠️ 这里只有**最近一次**的替换词 —— `book_interpretations` 一本书只有一行、
+// 状态会被覆盖；看历史去「发布记录」页（那边一次发布一条流水）。
+// ⚠️ 2026-10-13 **之前**的记录没有这个字段（那时只存了个数）→ `null`，
+// 弹窗里如实说明「只存了个数」，不是坏了。
+// ---------------------------------------------------------------------------
+
+const hitsVisible = ref(false)
+const hitsRow = ref<InterpretationVO | null>(null)
+
+function openHits(row: InterpretationVO): void {
+  hitsRow.value = row
+  hitsVisible.value = true
+}
+
+/** 弹窗里的词；历史记录（没有该字段）给空数组 */
+const hitsWords = computed<string[]>(() => hitsRow.value?.sensitiveHits ?? [])
+
+/** 弹窗标题：合规替换 ·《书名》 */
+const hitsTitle = computed<string>(() => {
+  const name = hitsRow.value?.title ?? hitsRow.value?.bookId
+  return name ? `合规替换 ·《${name}》` : '合规替换'
+})
+
+/**
+ * 排序。默认与后端 `InterpretationQuery` 的默认值一致：**推荐值降序**（用户 2026-10-13 指定）。
+ *
+ * <p>6 个数值列都支持正反序，排序是**服务端**做的（`sortable="custom"` + `@sort-change`）。
+ * 这里只存字段名与方向，真正的 `Sort` 由后端按 `resolveSortPath()` 拼。
+ */
+const sortField = ref<InterpretationSortField>('newRating')
+const sortAsc = ref(false)
+
+/**
+ * 表头排序箭头的数据源。
+ *
+ * <p>⚠️ `el-table` **只在挂载时读一次** `default-sort`，之后改它**不会更新箭头**。
+ * 本页没有「程序化改排序」的场景（不像图书库有分类联动），所以不用换 key 重建表格；
+ * 用户点表头时 el-table 自己管箭头，这里只负责把字段/方向同步给后端。
+ */
+const defaultSort = computed<{ prop: string; order: 'ascending' | 'descending' }>(() => ({
+  prop: sortField.value,
+  order: sortAsc.value ? 'ascending' : 'descending',
+}))
+
 const STATUS_OPTIONS: { label: string; value: PublishStatus | '' }[] = [
   { label: '全部', value: '' },
   { label: '待解读', value: 'PENDING' },
@@ -68,14 +128,16 @@ const STATUS_OPTIONS: { label: string; value: PublishStatus | '' }[] = [
  *
  * <p>默认「全部」状态 —— 这一页是「看清单」的，不是「只看待办」的。
  *
- * <p>⚠️ `categoryId` 传的是**一级分类**的 code。二级分类的 code 是 `subCategoryId`
- * （另一个字段），传进来恒不匹配、静默返回 0 条 —— 所以下面的 `categoryOptions` 只列一级。
+ * <p>⚠️ 平台分类**两级**（2026-10-13 起，需求：「支持二级，同图书库的筛选」）：
+ * 选一级发 `categoryId`、选到二级发 `subCategoryId`，**两者不会同时有值** ——
+ * 由下面的级联框按选中层级拆解（见 `applyCategoryPath`）。
  */
 const query = reactive<{
   status: PublishStatus | ''
   title?: string
   author?: string
   categoryId?: number
+  subCategoryId?: number
   minRating?: number
   maxRating?: number
   minReadingCount?: number
@@ -88,11 +150,133 @@ const query = reactive<{
 /** 字典：只用到分类（榜单在这里没有筛选价值，所以不拉） */
 const categories = ref<TaxonomyItem[]>([])
 
-const categoryOptions = computed(() =>
-  categories.value
+/**
+ * 「平台分类」级联树的节点。
+ *
+ * <p>⚠️ 二级分类的 `name` 自带父级前缀（如 `期刊杂志-财经`），展示时要剥掉，
+ * 否则会显示成「期刊杂志 / 期刊杂志-财经」这种重复。同图书库。
+ */
+interface CategoryNode {
+  value: number
+  label: string
+  children?: CategoryNode[]
+}
+
+/**
+ * 级联框选中的路径。`[]` = 不筛；`[一级]` = 筛一级；`[一级, 二级]` = 筛二级。
+ *
+ * <p>用**本地 ref** 而不是直接绑 `query.categoryId`：级联的值是数组，
+ * 而 `InterpretationQuery` 要的是两个标量字段，中间必须有一次「按层级拆解」的翻译
+ * （见 `applyCategoryPath`）。同图书库。
+ */
+const categoryPath = ref<number[]>([])
+
+/** 把级联框的原始值归一成 `number[]`（`null` / 非数组 / 被清空 → `[]`） */
+function normalizeCategoryPath(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+  return value.map((v) => Number(v)).filter((v) => !Number.isNaN(v))
+}
+
+/**
+ * 把选中路径落到 `query` 上。级联框的 `@change` 与「重置」共同调用它。
+ *
+ * <p>⚠️ 图书库那边同名的函数还会**联动排序**（选「期刊杂志」→ 出版时间倒序）。
+ * 这里**刻意不做**：① 候选清单的排序白名单（`InterpretationQuery.SORT_PATHS`）
+ * 里没有 `publishTime`；② 本页默认就是推荐值降序（用户 2026-10-13 指定），
+ * 被分类联动冲掉反而违背那条默认。
+ */
+function applyCategoryPath(path: number[]): void {
+  categoryPath.value = path
+  if (path.length === 0) {
+    query.categoryId = undefined
+    query.subCategoryId = undefined
+  } else if (path.length === 1) {
+    query.categoryId = path[0]
+    query.subCategoryId = undefined
+  } else {
+    query.categoryId = undefined
+    query.subCategoryId = path[1]
+  }
+}
+
+/**
+ * 级联框实例。**只为了在一个地方调 `togglePopperVisible(false)`**。
+ *
+ * <p>⚠️ `el-cascader` 在 `checkStrictly` 模式下选中后**不会自动收起**下拉
+ * （`cascader-panel` 的 `emitClose && !multiple && !checkStrictly` 条件里带
+ * `!checkStrictly`），而为了保住「能选一级」的能力又必须开它。
+ * 折中：**选到二级（叶子）时手动收起**；只选一级时保持展开，用户还要继续往下点。
+ */
+const cascaderRef = ref<{ togglePopperVisible?: (visible?: boolean) => void } | null>(null)
+
+/** 级联框的 `@change`：归一 → 落 query → 回第 1 页重查 */
+function onCategoryChange(value: unknown): void {
+  const path = normalizeCategoryPath(value)
+  applyCategoryPath(path)
+  if (path.length >= 2) {
+    cascaderRef.value?.togglePopperVisible?.(false)
+  }
+  page.value = 1
+  void loadList()
+}
+
+/**
+ * 「平台分类」的级联树：一级 + 挂在它下面的二级。
+ * 顺序沿用字典返回的顺序（后端按 `sort` 排好，不在这里重排）。同图书库。
+ */
+const categoryTree = computed<CategoryNode[]>(() => {
+  const byParent = new Map<string, TaxonomyItem[]>()
+  categories.value.forEach((c) => {
+    if (!c.parentCode) {
+      return
+    }
+    const list = byParent.get(c.parentCode)
+    if (list) {
+      list.push(c)
+    } else {
+      byParent.set(c.parentCode, [c])
+    }
+  })
+  return categories.value
     .filter((c) => !c.parentCode)
-    .map((c) => ({ value: Number(c.code), label: `${c.name}（${c.code}）` })),
-)
+    .map((c) => {
+      const node: CategoryNode = {
+        value: Number(c.code),
+        label: `${c.name}（${c.code}）`,
+      }
+      const prefix = `${c.name}-`
+      const kids = (byParent.get(c.code) ?? []).map((k) => ({
+        value: Number(k.code),
+        // 剥掉父名前缀：`期刊杂志-财经` → `财经`
+        label: `${k.name.startsWith(prefix) ? k.name.slice(prefix.length) : k.name}（${k.code}）`,
+      }))
+      if (kids.length > 0) {
+        node.children = kids
+      }
+      return node
+    })
+})
+
+/**
+ * `el-cascader` 的固定属性。
+ *
+ * <p>🔴 `checkStrictly` + `checkOnClickNode` **两个都要开**：只开 `checkStrictly`
+ * 时点一级只会展开、选不上（`checkOnClickNode` 默认 false）。
+ * `emitPath: true` 必须保留 —— 靠路径长度区分选的是哪一级（同图书库）。
+ */
+const CASCADER_PROPS = {
+  value: 'value',
+  label: 'label',
+  children: 'children',
+  checkStrictly: true,
+  checkOnClickNode: true,
+  emitPath: true,
+  // 2026-10-13：鼠标悬停到一级即展开二级，不选中（口径同图书库）。
+  // 默认 'click' + `checkOnClickNode: true` 时，点一级会顺带选中它。
+  expandTrigger: 'hover',
+}
 
 // ---------------------------------------------------------------------------
 // 藏书 / 阅读清单（四处统一的五个动作）
@@ -129,6 +313,8 @@ async function loadList(silent = false): Promise<void> {
   try {
     const data = await pageInterpretations({
       ...query,
+      sortField: sortField.value,
+      asc: sortAsc.value,
       page: page.value,
       size: size.value,
     })
@@ -219,49 +405,96 @@ async function confirmBatchDelete(): Promise<void> {
   }
 }
 
-async function onReset(row: InterpretationVO): Promise<void> {
-  // 已经发布过的重跑会在语雀里**新增**一篇（旧的那篇不会删）—— 这是边界条件，必须讲出来
-  const alreadyPublished = row.status === 'PUBLISHED'
-  const extra = alreadyPublished
-    ? '⚠️ 这本书已经发布过了。重新生成会在语雀里新增一篇文档，旧的那篇不会被删除。'
-    : ''
+/**
+ * 行内「重置为」下拉（2026-10-16 由单一「重置」按钮演化）。
+ *
+ * <h3>为什么变成下拉</h3>
+ * 原来只有「重置为待解读」一个动作。用户要的第二个动作是「标记为已发布」——
+ * 场景是：这篇文章是手工发出去的（或早期用别的方式发过），清单里却还是
+ * 「待解读 / 失败」，状态与实际不符，需要手工纠正。
+ *
+ * <p>两个目标共用一个按钮：下拉开销（一次点击 + 一次选择）能接受，
+ * 而平铺两个按钮会把操作列撑宽（现在 150px 里还塞着 `BookActionMenu`）。
+ *
+ * <h3>🔴 文案必须按目标状态分开写</h3>
+ * 「重置为待解读」和「标记为已发布」的后果完全不同，绝不能用同一句确认词：
+ * <ul>
+ *   <li><b>待解读</b>：下次挑书时它重新参与 → 如果已经发布过，
+ *       重跑会在语雀里**新增**一篇（旧的不删）—— 这条必须讲出来；</li>
+ *   <li><b>已发布</b>：只改清单状态，**不会**在语雀上产生文章、
+ *       也不写发布记录流水 —— 不写清楚会让人以为「点一下就等于发了」。</li>
+ * </ul>
+ *
+ * <p>而且两个方向都**不**碰时间字段（`finishedAt` / `publishedAt`）：
+ * 标记状态不等于真的发过，写个假时间进去会污染「最近发布」这类统计。
+ */
+async function onResetTo(row: InterpretationVO, target: InterpretationResetTarget): Promise<void> {
+  const label = PUBLISH_STATUS_LABEL[target]
+  const bookTitle = `《${row.title ?? row.bookId}》`
+
+  // —— 确认文案按目标状态分岔 ——
+  let message: string
+  if (target === 'PUBLISHED') {
+    const wasPublished = row.status === 'PUBLISHED'
+    message =
+      `把 ${bookTitle} 标记为「已发布」？\n\n` +
+      `⚠️ 这只改候选清单里的状态，**不会**在语雀上新建文章，` +
+      `也不会写一条「发布记录」流水 —— 已发布的文档链接请另外维护。\n` +
+      (wasPublished ? '（它当前已经是「已发布」）' : '')
+  } else {
+    // 已经发布过的重跑会在语雀里**新增**一篇（旧的那篇不会删）—— 必须讲出来
+    const extra =
+      row.status === 'PUBLISHED'
+        ? '\n\n⚠️ 这本书已经发布过了。重新生成会在语雀里新增一篇文档，旧的那篇不会被删除。'
+        : ''
+    message = `把 ${bookTitle} 重置为「待解读」，下次挑书时它会重新参与。${extra}`
+  }
+
   try {
-    await ElMessageBox.confirm(
-      `把《${row.title ?? row.bookId}》重置为「待解读」，下次挑书时它会重新参与。${extra}`,
-      '重置为待解读',
-      { type: 'warning', confirmButtonText: '重置', cancelButtonText: '取消' },
-    )
+    await ElMessageBox.confirm(message, `重置为${label}`, {
+      type: 'warning',
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+    })
   } catch {
     return
   }
   try {
-    await resetInterpretation(row.bookId)
-    ElMessage.success('已重置为待解读')
+    await resetInterpretation(row.bookId, target)
+    ElMessage.success(`已重置为「${label}」`)
     await loadList()
   } catch {
     // 拦截器已提示
   }
 }
 
+/** 下拉选中项：el-dropdown 的 command 是字符串，收窄回目标状态类型 */
+function onResetCommand(row: InterpretationVO, command: string): void {
+  void onResetTo(row, command as InterpretationResetTarget)
+}
+
 // ---------------------------------------------------------------------------
-// 重置精选（整批重建候选池）
+// 精选配置（弹窗）
 // ---------------------------------------------------------------------------
 
 /**
- * 「重置精选」= 原「发布配置 → 初始化候选」，2026-10-12 搬来本页并改名。
+ * 「精选配置」= 原「重置精选」，2026-10-12 改成弹窗（见 `ConfigDialog.vue`）。
  *
- * <p>它做的事没变：按当前的分类白名单 + 评级档位 + 评价人数下限，从图书库里
- * 重新挑一批书进候选清单（已在清单里的跳过，所以可以重复执行）。
+ * <p>变化：原来那个按钮是「按配置里的白名单全量重建候选池」，条件写死；
+ * 现在由用户在弹窗里当场挑条件、先预览、再决定精选哪些。
  *
- * <p>🔴 **它是「提交即返回」的后台长任务**：`initCandidates()` 一返回就说明任务已受理，
+ * <p>🔴 **精选是「提交即返回」的后台长任务**：`collectCandidates()` 一返回只说明任务已受理，
  * 真正的进度要从 `getPublishJob()` 的 `initRunning / initScanned / initInserted / initSkipped`
  * 读 —— 这几个字段来自后端**内存**，所以刷新页面之后也接着看得到。
- * 本页因此要自己轮询：跑完再刷新列表，否则用户看到的还是旧的清单。
+ *
+ * <p>弹窗打开时由它自己轮询，本页负责「弹窗关掉之后」的收尾：
+ * 用户很可能点完「全部精选」就关掉弹窗，这时进度得在页面上继续看、跑完得刷新列表。
  */
 
-/** 从点按钮到提交返回之间 */
-const resetting = ref(false)
-/** 后台真的在跑（与按钮的 loading 不是一回事：提交返回后它还可能是 true） */
+/** 弹窗可见性 */
+const configVisible = ref(false)
+
+/** 后台真的在跑（不是按钮的 loading：提交返回后它还可能是 true） */
 const resetRunning = ref(false)
 /** 进度快照，只在 `resetRunning` 为 true 时有意义 */
 const resetProgress = ref<{ scanned: number; inserted: number; skipped: number } | null>(null)
@@ -309,7 +542,7 @@ async function pollReset(): Promise<void> {
     }
     const p = resetProgress.value
     ElMessage.success(
-      `重置完成：扫描 ${formatNumber(p?.scanned)} 本，新增 ${formatNumber(p?.inserted)} 条，` +
+      `精选完成：扫描 ${formatNumber(p?.scanned)} 本，新增 ${formatNumber(p?.inserted)} 条，` +
         `跳过 ${formatNumber(p?.skipped)} 条`,
     )
     // 清单已经变了，从第一页重新拉
@@ -324,8 +557,8 @@ async function pollReset(): Promise<void> {
 /**
  * 进页面时同步一次状态。
  *
- * <p>初始化可能是在**别的时刻**触发的（用户点了重置之后刷新了页面），
- * 不查一次的话按钮会显示成可点，用户会以为任务没在跑。
+ * <p>精选可能是在**别的时刻**触发的（用户点完就关了弹窗、或者刷新了页面），
+ * 不查一次的话进度会显示成没在跑，用户会以为任务丢了。
  */
 async function syncResetState(): Promise<void> {
   try {
@@ -339,27 +572,31 @@ async function syncResetState(): Promise<void> {
   }
 }
 
-async function onResetAll(): Promise<void> {
-  try {
-    await ElMessageBox.confirm(
-      '将按当前的分类白名单 + 评级档位 + 评价人数下限，从图书库里重新挑出符合条件的图书放进候选清单。' +
-        '已经在清单里的会跳过，所以可以放心重复执行。任务在后台跑，可以留在本页看进度。',
-      '重置精选',
-      { type: 'warning', confirmButtonText: '开始重置', cancelButtonText: '取消' },
-    )
-  } catch {
-    return
-  }
-  resetting.value = true
-  try {
-    const data = await initCandidates()
-    applyResetState(data)
-    ElMessage.success('已提交，正在后台执行')
-    scheduleResetPoll()
-  } catch {
-    // 拦截器已提示
-  } finally {
-    resetting.value = false
+/**
+ * 打开弹窗。
+ *
+ * <p>先停掉本页的轮询 —— 弹窗打开后由它自己轮询，
+ * 两边同时轮询会让「完成」提示弹两次。
+ */
+function onOpenConfig(): void {
+  stopResetPoll()
+  configVisible.value = true
+}
+
+/**
+ * 候选清单可能变了 —— 同步状态并（在没有任务跑时）局部刷新列表。
+ *
+ * <p>两个触发点：**弹窗关闭**、**弹窗里的精选跑完**。两种情况：
+ * <ul>
+ *   <li>没有任务在跑 → 直接刷新列表；</li>
+ *   <li>任务还在跑 → `syncResetState()` 会接上轮询，跑完自动刷新。</li>
+ * </ul>
+ */
+async function onCollected(): Promise<void> {
+  await syncResetState()
+  if (!resetRunning.value) {
+    page.value = 1
+    await loadList()
   }
 }
 
@@ -376,7 +613,8 @@ function handleReset(): void {
   query.status = ''
   query.title = undefined
   query.author = undefined
-  query.categoryId = undefined
+  // 「平台分类」走级联框，单独清：`applyCategoryPath([])` 会一并清掉 categoryId / subCategoryId
+  applyCategoryPath([])
   query.minRating = undefined
   query.maxRating = undefined
   query.minReadingCount = undefined
@@ -401,6 +639,26 @@ function onSizeChange(next: number): void {
 
 function handleSelectionChange(list: unknown[]): void {
   selectedRows.value = list as InterpretationVO[]
+}
+
+/**
+ * el-table 的自定义排序回调（经 `ProTable` 转发）。
+ *
+ * <p>`order` 是 `'ascending' | 'descending' | null`，`null` 表示用户取消了排序 ——
+ * 这时回到后端默认的「推荐值降序」，而不是「保持上一次的字段、只是不排」。
+ *
+ * <p>换排序要**回到第 1 页** —— 否则在第 5 页改排序会请求一个基于旧序的页码，看到的不是真正的第 5 页。
+ */
+function handleSortChange({ prop, order }: { prop: string | null; order: string | null }): void {
+  if (!order || !prop) {
+    sortField.value = 'newRating'
+    sortAsc.value = false
+  } else {
+    sortField.value = prop as InterpretationSortField
+    sortAsc.value = order === 'ascending'
+  }
+  page.value = 1
+  void loadList()
 }
 
 // ---------------------------------------------------------------------------
@@ -433,13 +691,6 @@ onUnmounted(stopResetPoll)
 
 <template>
   <div class="page">
-    <el-alert type="info" :closable="false" class="intro">
-      <template #title>
-        AI 解读的候选清单：按「分类白名单 + 评级档位 + 评价人数下限」从图书库里挑出来的高质量图书。
-        本页负责重置清单（「重置精选」）、看清单、清理清单；生成与发布在「配置 → 发布配置」里执行。
-      </template>
-    </el-alert>
-
     <!-- ============ 筛选 ============ -->
     <SearchForm
       :model="query"
@@ -449,7 +700,7 @@ onUnmounted(stopResetPoll)
       @search="handleSearch"
       @reset="handleReset"
     >
-      <el-form-item label="状态">
+      <el-form-item label="发布状态">
         <el-select v-model="query.status" clearable placeholder="全部">
           <el-option
             v-for="o in STATUS_OPTIONS"
@@ -469,14 +720,17 @@ onUnmounted(stopResetPoll)
       </el-form-item>
 
       <el-form-item label="平台分类">
-        <el-select v-model="query.categoryId" clearable filterable placeholder="全部">
-          <el-option
-            v-for="opt in categoryOptions"
-            :key="opt.value"
-            :label="opt.label"
-            :value="opt.value"
-          />
-        </el-select>
+        <el-cascader
+          ref="cascaderRef"
+          :model-value="categoryPath"
+          :options="categoryTree"
+          :props="CASCADER_PROPS"
+          clearable
+          filterable
+          placeholder="全部（可选到二级分类）"
+          class="category-cascader"
+          @change="onCategoryChange"
+        />
       </el-form-item>
 
       <el-form-item label="推荐值区间">
@@ -515,19 +769,12 @@ onUnmounted(stopResetPoll)
       <el-form-item label="出版时间到">
         <el-input v-model="query.maxPublishTime" clearable placeholder="2023 / 2023-12" />
       </el-form-item>
-
-      <div class="query-hint">
-        筛选条件与「图书库」一致（状态 / 书名 / 作者 / 平台分类 / 推荐值区间 /
-        阅读人数下限 / 出版时间区间），条件之间是「与」的关系。书名与作者是<b>模糊搜索</b>。
-        勾选后可批量删除，<b>不限状态</b> —— 已发布到语雀的也能删。
-      </div>
     </SearchForm>
 
     <!-- ============ 清单 ============ -->
     <el-card shadow="never">
       <template #header>
         <div class="card-header">
-          <span class="card-title">候选清单</span>
           <span class="hint">共 {{ total }} 条</span>
         </div>
       </template>
@@ -539,23 +786,19 @@ onUnmounted(stopResetPoll)
         :page="page"
         :size="size"
         :page-sizes="[20, 50, 100]"
+        :default-sort="defaultSort"
         row-key="bookId"
         selectable
-        empty-text="清单还是空的（或没有符合筛选条件的条目）。点上面的「重置精选」把符合条件的图书挑进来。"
+        empty-text="清单还是空的（或没有符合筛选条件的条目）。点上面的「精选配置」挑符合条件的图书进来。"
         @update:page="onPageChange"
         @update:size="onSizeChange"
+        @sort-change="handleSortChange"
         @selection-change="handleSelectionChange"
       >
         <template #toolbar>
-          <el-button
-            type="primary"
-            plain
-            :loading="resetting"
-            :disabled="resetRunning"
-            @click="onResetAll"
-          >
-            <el-icon><Refresh /></el-icon>
-            重置精选
+          <el-button type="primary" plain @click="onOpenConfig">
+            <el-icon><Setting /></el-icon>
+            精选配置
           </el-button>
           <el-button
             v-if="selectedRows.length > 0"
@@ -567,7 +810,7 @@ onUnmounted(stopResetPoll)
             批量删除（{{ selectedRows.length }}）
           </el-button>
           <span v-if="resetRunning" class="reset-progress">
-            正在重置精选：已扫描 {{ formatNumber(resetProgress?.scanned) }} 本，
+            正在精选：已扫描 {{ formatNumber(resetProgress?.scanned) }} 本，
             新增 {{ formatNumber(resetProgress?.inserted) }} 条，
             跳过 {{ formatNumber(resetProgress?.skipped) }} 条
           </span>
@@ -587,13 +830,78 @@ onUnmounted(stopResetPoll)
           <template #default="{ row }">{{ dash(row.category) }}</template>
         </el-table-column>
 
-        <el-table-column label="推荐值" width="84" align="right">
+        <el-table-column
+          prop="newRating"
+          label="推荐值"
+          width="84"
+          align="right"
+          sortable="custom"
+        >
           <template #default="{ row }">{{ ratingText(row.newRating) }}</template>
         </el-table-column>
 
-        <el-table-column label="评价人数" width="96" align="right">
+        <!-- 评价标题（档位文案：神作 / 好评如潮 / …），2026-10-13 加。非数值列，不参与排序 -->
+        <el-table-column prop="newRatingTitle" label="评价标题" width="84" show-overflow-tooltip>
+          <template #default="{ row }">{{ dash(row.newRatingTitle) }}</template>
+        </el-table-column>
+
+        <el-table-column
+          prop="newRatingCount"
+          label="评价人数"
+          width="96"
+          align="right"
+          sortable="custom"
+        >
           <template #default="{ row }">
             <span class="num">{{ formatNumber(row.newRatingCount) }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column
+          prop="readingCount"
+          label="阅读人数"
+          width="96"
+          align="right"
+          sortable="custom"
+        >
+          <template #default="{ row }">
+            <span class="num">{{ formatNumber(row.readingCount) }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column
+          prop="goodCount"
+          label="好评数"
+          width="84"
+          align="right"
+          sortable="custom"
+        >
+          <template #default="{ row }">
+            <span class="num">{{ formatNumber(row.goodCount) }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column
+          prop="fairCount"
+          label="中评数"
+          width="84"
+          align="right"
+          sortable="custom"
+        >
+          <template #default="{ row }">
+            <span class="num">{{ formatNumber(row.fairCount) }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column
+          prop="poorCount"
+          label="差评数"
+          width="84"
+          align="right"
+          sortable="custom"
+        >
+          <template #default="{ row }">
+            <span class="num">{{ formatNumber(row.poorCount) }}</span>
           </template>
         </el-table-column>
 
@@ -622,7 +930,15 @@ onUnmounted(stopResetPoll)
 
         <el-table-column label="合规替换" width="92" align="center">
           <template #default="{ row }">
-            <span v-if="row.sensitiveHitCount" class="num">{{ row.sensitiveHitCount }} 词</span>
+            <!-- 点开看**替换了哪些词**（2026-10-13）；没有命中的行不可点 -->
+            <el-link
+              v-if="row.sensitiveHitCount"
+              type="primary"
+              :underline="false"
+              @click="openHits(row)"
+            >
+              {{ row.sensitiveHitCount }} 词
+            </el-link>
             <span v-else>-</span>
           </template>
         </el-table-column>
@@ -638,9 +954,40 @@ onUnmounted(stopResetPoll)
           <template #default="{ row }">{{ formatDateTime(row.finishedAt) }}</template>
         </el-table-column>
 
-        <el-table-column label="操作" width="150" align="center" fixed="right">
+        <!--
+          操作列 168px：从 150 放宽，容纳「重置为 ▾」小按钮 + 「更多 ▾」链接按钮。
+          （本表固定列合计就已超过屏宽，本来就有横向滚动；这里只是把 fixed-right
+            区多占 18px，属于必要开销。）
+        -->
+        <el-table-column label="操作" width="168" align="center" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" @click="onReset(row)">重置</el-button>
+            <!--
+              「重置为」下拉：待解读 / 已发布。
+              当前状态那一项禁用（不能重复设成同一个值）—— 同 `BookActionMenu`
+              里阅读状态三项的处理，避免用户点了个「什么都没发生」的动作。
+            -->
+            <el-dropdown
+              trigger="click"
+              :disabled="busy"
+              @command="(cmd: string) => onResetCommand(row, cmd)"
+            >
+              <el-button size="small" :disabled="busy">
+                重置为
+                <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item
+                    v-for="t in INTERPRETATION_RESET_TARGETS"
+                    :key="t"
+                    :command="t"
+                    :disabled="row.status === t"
+                  >
+                    {{ row.status === t ? `当前：${PUBLISH_STATUS_LABEL[t]}` : PUBLISH_STATUS_LABEL[t] }}
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
             <BookActionMenu
               :book-id="row.bookId"
               :on-shelf="isOnShelf(row.bookId)"
@@ -654,6 +1001,38 @@ onUnmounted(stopResetPoll)
         </el-table-column>
       </ProTable>
     </el-card>
+
+    <!-- 精选配置弹窗（原「重置精选」，2026-10-12 改） -->
+    <ConfigDialog v-model="configVisible" @collected="onCollected" />
+
+    <!--
+      合规替换明细：点那一列弹出。数据是本次命中的敏感词**原词**列表
+      （顺序 = 替换时的扫描顺序；同一个词出现多次会列多次）。
+      ⚠️ 2026-10-13 之前的记录没有列表、只有个数 —— 走下面的空态说明。
+    -->
+    <el-dialog v-model="hitsVisible" :title="hitsTitle" width="520px">
+      <template v-if="hitsWords.length">
+        <div class="hits-hint">共 {{ hitsWords.length }} 处命中，按替换时的扫描顺序：</div>
+        <div class="hits-list">
+          <el-tag
+            v-for="(w, i) in hitsWords"
+            :key="`${w}-${i}`"
+            size="small"
+            type="warning"
+            effect="plain"
+          >
+            {{ w }}
+          </el-tag>
+        </div>
+      </template>
+      <el-empty
+        v-else
+        :image-size="72"
+        :description="hitsRow?.sensitiveHitCount
+          ? '这条记录只存了替换词个数，没存具体词（2026-10-13 起才记录）'
+          : '没有命中敏感词'"
+      />
+    </el-dialog>
   </div>
 </template>
 
@@ -664,18 +1043,10 @@ onUnmounted(stopResetPoll)
   gap: 12px;
 }
 
-.intro :deep(.el-alert__title) {
-  line-height: 1.7;
-}
-
 .card-header {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-.card-title {
-  font-weight: 600;
 }
 
 .hint {
@@ -698,6 +1069,15 @@ onUnmounted(stopResetPoll)
 .range-sep {
   color: #909399;
   flex-shrink: 0;
+}
+
+/*
+ * ⚠️ `el-cascader` 默认 `display: inline-block` 且**没有 width**
+ * （Element Plus 2.14.6 的 `.el-cascader` 只有 `display:inline-block;position:relative`），
+ * 放进表单会缩成内容宽度。给 100% 才和同排的 `el-select` / 数字框一样占满。
+ */
+.category-cascader {
+  width: 100%;
 }
 
 .query-hint {
@@ -735,5 +1115,20 @@ onUnmounted(stopResetPoll)
 
 .error-msg {
   color: #f56c6c;
+}
+
+/* 「合规替换」弹窗 */
+.hits-hint {
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.hits-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
 }
 </style>

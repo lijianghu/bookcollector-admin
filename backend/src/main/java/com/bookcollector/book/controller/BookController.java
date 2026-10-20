@@ -1,9 +1,12 @@
 package com.bookcollector.book.controller;
 
+import com.bookcollector.book.dto.EnrichResult;
 import com.bookcollector.book.entity.Book;
 import com.bookcollector.book.req.BatchDeleteRequest;
+import com.bookcollector.book.req.BookEnrichRequest;
 import com.bookcollector.book.req.BookQuery;
 import com.bookcollector.book.req.BookUpdateRequest;
+import com.bookcollector.book.service.BookEnrichService;
 import com.bookcollector.book.service.BookService;
 import com.bookcollector.common.PageResult;
 import com.bookcollector.common.ResultBean;
@@ -38,9 +41,11 @@ import java.util.Map;
 public class BookController {
 
     private final BookService service;
+    private final BookEnrichService enrichService;
 
-    public BookController(BookService service) {
+    public BookController(BookService service, BookEnrichService enrichService) {
         this.service = service;
+        this.enrichService = enrichService;
     }
 
     @Operation(summary = "分页查询图书",
@@ -54,7 +59,8 @@ public class BookController {
         return ResultBean.ok(service.page(query));
     }
 
-    @Operation(summary = "图书详情", description = "返回全部 46 个业务字段 + 采集元数据")
+    @Operation(summary = "图书详情", description = "返回全部业务字段（与 BookInfo 对应的 46 个 + book/info 补充的字段）"
+            + " + 采集元数据")
     @GetMapping("/{bookId}")
     public ResultBean<Book> detail(
             @Parameter(description = "图书 ID", required = true) @PathVariable String bookId) {
@@ -89,5 +95,26 @@ public class BookController {
         data.put("requested", req.getBookIds().size());
         data.put("deleted", deleted);
         return ResultBean.ok(data);
+    }
+
+    @Operation(summary = "完善书籍信息（提交）",
+            description = "把书单链路漏掉的字段（简介 / 分类，以及一批原来没建模的字段）"
+                    + "用 /book/info 逐本补齐。"
+                    + "口径：①只补「采集时间是今天」的书；②category 优先用 categories[0].title "
+                    + "本地派生（不发请求）；③库里已有值的字段不覆盖；"
+                    + "④5 并发、每请求前随机等 1~5 秒。"
+                    + "⚠️ **提交即返回**（不阻塞 HTTP），随后轮询 /books/enrich/progress 看进度 —— "
+                    + "一页最多 200 本，可能要几分钟。")
+    @PostMapping("/enrich")
+    public ResultBean<EnrichResult> enrich(@Validated @RequestBody BookEnrichRequest req) {
+        return ResultBean.ok(enrichService.enrich(req.getBookIds()));
+    }
+
+    @Operation(summary = "完善书籍信息的进度",
+            description = "返回进度快照（内存态，进程重启即归零，不做持久化）。"
+                    + "前端按 running 决定要不要继续轮询；processed / requested 就是进度条的比例。")
+    @GetMapping("/enrich/progress")
+    public ResultBean<EnrichResult> enrichProgress() {
+        return ResultBean.ok(enrichService.progress());
     }
 }

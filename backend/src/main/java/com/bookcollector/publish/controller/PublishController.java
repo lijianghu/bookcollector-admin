@@ -2,14 +2,17 @@ package com.bookcollector.publish.controller;
 
 import com.bookcollector.common.PageResult;
 import com.bookcollector.common.ResultBean;
+import com.bookcollector.publish.req.CandidateBuildRequest;
 import com.bookcollector.publish.req.InterpretationBatchDeleteRequest;
 import com.bookcollector.publish.req.InterpretationQuery;
 import com.bookcollector.publish.req.PublishConfigRequest;
 import com.bookcollector.publish.service.PublishService;
+import com.bookcollector.publish.vo.CandidateBookVO;
 import com.bookcollector.publish.vo.InterpretationVO;
 import com.bookcollector.publish.vo.PublishJobVO;
 
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -18,6 +21,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
@@ -79,6 +83,29 @@ public class PublishController {
         return ResultBean.ok(service.initializeCandidates());
     }
 
+    @Operation(summary = "精选预览",
+            description = "按「精选配置」的筛选条件从图书库查一页，**只读不写**。"
+                    + "条件与「精选」完全共用，保证「预览到什么、精选的就是什么」。"
+                    + "平台分类（categoryIds）必填；评价标签 / 推荐值下限 / 书名 / 作者 至少给一个")
+    @PostMapping("/candidates/preview")
+    public ResultBean<PageResult<CandidateBookVO>> previewCandidates(
+            @RequestBody CandidateBuildRequest req,
+            @RequestParam(name = "page", defaultValue = "1") Integer page,
+            @RequestParam(name = "size", defaultValue = "20") Integer size) {
+        return ResultBean.ok(service.previewCandidates(req, page, size));
+    }
+
+    @Operation(summary = "精选（批量 / 全部）",
+            description = "把符合条件的书快照进候选清单（已有的跳过，可反复执行）。"
+                    + "all=true 时忽略 bookIds、按条件全量写入；否则只处理 bookIds 里那几本"
+                    + "（= 预览列表里勾选的当页行）。"
+                    + "提交后立即返回，进度看 GET /api/publish/job 的 "
+                    + "initRunning / initScanned / initInserted")
+    @PostMapping("/candidates/collect")
+    public ResultBean<PublishJobVO> collectCandidates(@RequestBody CandidateBuildRequest req) {
+        return ResultBean.ok(service.collectCandidates(req));
+    }
+
     @Operation(summary = "清空未解读候选",
             description = "只删掉「待解读」的条目，已发布 / 失败 / 生成中的不受影响。"
                     + "换过分类白名单之后，旧候选已经不再符合条件，需要先清空再重新初始化")
@@ -110,12 +137,18 @@ public class PublishController {
         return ResultBean.ok(data);
     }
 
-    @Operation(summary = "重置为待解读",
-            description = "把某一条重新排进队列。用于捞回卡住的「生成中」（进程被杀会残留），"
-                    + "或让失败的再跑一次（失败不自动重试）")
+    @Operation(summary = "重置为指定状态",
+            description = "把某一条的状态改掉。用于捞回卡住的「生成中」（进程被杀会残留）、"
+                    + "让失败的再跑一次（失败不自动重试）、或把清单里的状态改成实际发布情况。"
+                    + "status 只接受 PENDING（待解读）/ PUBLISHED（已发布）；"
+                    + "不传 = PENDING，与老接口行为一致。"
+                    + "⚠️ 标记成 PUBLISHED 只改清单状态，不会在语雀上产生文章")
     @PostMapping("/interpretations/{bookId}/reset")
-    public ResultBean<Boolean> reset(@PathVariable("bookId") String bookId) {
-        return ResultBean.ok(service.resetToPending(bookId));
+    public ResultBean<Boolean> reset(
+            @PathVariable("bookId") String bookId,
+            @Parameter(description = "目标状态：PENDING（默认）/ PUBLISHED")
+            @RequestParam(value = "status", required = false) String status) {
+        return ResultBean.ok(service.resetTo(bookId, status));
     }
 
     // ==================================================================

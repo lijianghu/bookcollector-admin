@@ -1,7 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { batchDeleteBooks, deleteBook, getBook, pageBooks } from '@/api/book'
+import {
+  batchDeleteBooks,
+  deleteBook,
+  enrichBooks,
+  getBook,
+  getEnrichProgress,
+  pageBooks,
+} from '@/api/book'
+import { listBooklistOptions } from '@/api/booklist'
 import { listTaxonomy } from '@/api/taxonomy'
 import ProTable from '@/components/ProTable.vue'
 import SearchForm from '@/components/SearchForm.vue'
@@ -12,7 +20,17 @@ import { useBookActions } from '@/composables/useBookActions'
 import { buildBookDetailSections, countDetailItems } from './detail-sections'
 import BookEditDialog from './BookEditDialog.vue'
 import { dash, formatDate, formatNumber, formatPublishDate } from '@/utils/format'
-import type { Book, BookQuery, BookSortField, TaxonomyItem } from '@/types'
+import {
+  BOOK_MISSING_OPTIONS,
+  targetTypeLabel,
+  type Book,
+  type BooklistOption,
+  type BookMissingField,
+  type BookQuery,
+  type BookSortField,
+  type EnrichResult,
+  type TaxonomyItem,
+} from '@/types'
 
 /**
  * 图书库（S6.2）。
@@ -66,16 +84,55 @@ const COLUMNS: ColumnPref[] = [
   { key: 'author', label: '作者' },
   { key: 'category', label: '平台分类' },
   { key: 'newRating', label: '推荐值' },
+  // 2026-10-13 加、**默认显示**。它的 84px 是从下面几列各挤一点腾出来的（见列定义处的说明）
+  { key: 'newRatingTitle', label: '评价标题' },
   { key: 'newRatingCount', label: '评价人数' },
   { key: 'readingCount', label: '阅读人数' },
   { key: 'publishTime', label: '出版时间' },
   // 下面两列默认不显示：它们是「想深入看的时候才需要」的信息，但很占地方
   { key: 'lastCollectedAt', label: '最近采集', defaultVisible: false },
   { key: 'collectSource', label: '采集来源', defaultVisible: false },
+  // 2026-10-20：付费精选采集标记（paidCollect = 1）
+  { key: 'paidCollect', label: '付费精选', defaultVisible: true },
   { key: 'actions', label: '操作', fixed: true },
 ]
 
 const cols = useColumnPrefs('books', COLUMNS)
+
+/**
+ * 一次性迁移（2026-10-13）：新增的「评价标题」列要**默认显示**，
+ * 但老用户的 localStorage 配置里没有这个 key —— `useColumnPrefs.load()` 的合并口径是
+ * 「旧配置 ∩ 当前列清单」，缺的列**不会被补回来**，新列会静默不显示。
+ *
+ * <p>所以这里补一次并打标记：**只补一次**。之后用户主动关掉它不会被重开
+ * （若每次都补，这一列就永远关不掉了）。
+ */
+const RATING_TITLE_MIGRATION_KEY = 'bookcollector_columns_books_newRatingTitle'
+if (!localStorage.getItem(RATING_TITLE_MIGRATION_KEY)) {
+  if (!cols.isVisible('newRatingTitle')) {
+    cols.visible.value = [...cols.visible.value, 'newRatingTitle']
+  }
+  try {
+    localStorage.setItem(RATING_TITLE_MIGRATION_KEY, '1')
+  } catch {
+    // 隐私模式下写不进去：退化成「每次进来补一次」= 这一列关不掉，不影响功能
+  }
+}
+
+// 2026-10-20：新增「付费精选」列。老用户的 localStorage 里没有这个 key，
+// 用同样的「只补一次」迁移把它补进来（之后用户可自己关掉）。
+const PAID_COLLECT_MIGRATION_KEY = 'bookcollector_columns_books_paidCollect'
+if (!localStorage.getItem(PAID_COLLECT_MIGRATION_KEY)) {
+  if (!cols.isVisible('paidCollect')) {
+    cols.visible.value = [...cols.visible.value, 'paidCollect']
+  }
+  try {
+    localStorage.setItem(PAID_COLLECT_MIGRATION_KEY, '1')
+  } catch {
+    // 隐私模式：退化成每次进来补一次，不影响功能
+  }
+}
+
 const columnPanelVisible = ref(false)
 
 // ---------------------------------------------------------------------------
@@ -89,6 +146,26 @@ const page = ref(1)
 const size = ref(20)
 const selectedRows = ref<Book[]>([])
 const deleting = ref(false)
+/** 最新进度快照。null = 本次页面会话里还没提交过 */
+const enrichProgress = ref<EnrichResult | null>(null)
+
+/** 是否正在跑。模板据此禁用按钮、显示进度条 */
+const enrichRunning = computed(() => enrichProgress.value?.running === true)
+
+/** 进度百分比（0~100）。分母为 0 时给 0，别让 el-progress 拿到 NaN */
+const enrichPercent = computed(() => {
+  const p = enrichProgress.value
+  if (!p || !p.requested) {
+    return 0
+  }
+  return Math.min(100, Math.round((p.processed / p.requested) * 100))
+})
+
+/** 进度轮询的定时器句柄。用 setTimeout 自递归而不是 setInterval —— 请求慢时不会堆积 */
+let enrichTimer: number | undefined
+
+/** 上一次看到的 running。用来识别「刚刚跑完」这一次跃迁（只在那一刻提示 + 刷新列表） */
+let enrichWasRunning = false
 
 /** 排序。默认与后端 `BookQuery` 的默认值一致：推荐值降序 */
 const sortField = ref<BookSortField>('newRating')
@@ -126,11 +203,15 @@ const defaultSort = computed<{ prop: string; order: 'ascending' | 'descending' }
 const tableKey = ref(0)
 
 /**
- * 查询条件。与 `BookQuery` 的 18 个参数一一对应。
+ * 查询条件（**筛选部分**）。后端 `BookQuery` 一共 18 个参数，其余几个
+ * （`sortField` / `asc` / `page` / `size`）在下面各自有独立的 ref。
  *
  * `categoryId` / `subCategoryId` 是**数字**（后端分别精确匹配 `categories.categoryId` /
- * `categories.subCategoryId`），而 `targetId` 是**字符串**（分类的 code 是 "300000"，
- * 榜单的 code 是 "rising"）。类型不一样是后端的实际契约，不是笔误。
+ * `categories.subCategoryId`）。
+ *
+ * ⚠️ 后端的 `targetType` / `targetId`（按采集来源筛）**前端已不用** ——
+ * 2026-10-12 用户把筛选栏里的「采集来源」项删了；后端接口仍然支持（`BookQuery` 未删），
+ * 但这里不再带这两个字段。列表里的「采集来源」**列**是另一回事，仍在（读 `collectSource`）。
  *
  * ⚠️ `categoryId`（一级）与 `subCategoryId`（二级）**不会同时有值** ——
  * 由下面「平台分类」的级联框按选中的层级二选一发，见 `categoryPath` 的说明。
@@ -156,23 +237,45 @@ const query = reactive<{
   maxRating?: number
   minReadingCount?: number
   newRatingTitle?: string
-  targetType: '' | 'CATEGORY' | 'RANKING'
-  targetId?: string
   title?: string
   author?: string
   minPublishTime?: string
   maxPublishTime?: string
   minCollectedAt?: string
   maxCollectedAt?: string
-}>({
-  targetType: '',
-})
+  /** 缺哪个字段（2026-10-16）。取值见 BOOK_MISSING_OPTIONS；不传 = 不筛这一项 */
+  missing?: BookMissingField
+  /** 书单（2026-10-16）。值来自 /api/booklists/options */
+  booklistId?: string
+  /** 字数下限（2026-10-16）。后端语义是 `totalWords >= 这个值` */
+  minTotalWords?: number
+  /** 补齐状态（2026-10-16）。true = 补过，false = 从没补过，不传 = 不筛这一项 */
+  enriched?: boolean
+  /** 付费精选（2026-10-20）。true = 只要付费精选，false = 排除，不传 = 不筛这一项 */
+  paidCollect?: boolean
+}>({})
+
+/**
+ * 书单下拉选项（2026-10-16）。
+ *
+ * 一次性拉全量 —— 后端 `/api/booklists/options` 不分页、只投影 `booklistId` + `name`。
+ * 名称还没回填时用 `booklistId` 兜底显示：下拉里不能出现空白项。
+ */
+const booklistOptions = ref<BooklistOption[]>([])
+
+async function loadBooklistOptions(): Promise<void> {
+  try {
+    booklistOptions.value = await listBooklistOptions()
+  } catch {
+    // 拦截器已提示；下拉为空不影响其它筛选
+  }
+}
 
 /**
  * 「评价标题」（`books.newRatingTitle`）的候选项。
  *
  * <h3>🔴 为什么写死在这里，而不是加个接口</h3>
- * 用户 2026-10-12 明确选了「前端写死」。**代价已知**：微信读书新增档位时这里会漏
+ * 用户 2026-10-12 明确选了「前端写死」。**代价已知**：阅读平台新增档位时这里会漏
  * —— 2026-10-12 实测库里就多出一个上次调研没有的 `烂书一本`（2 本）。
  * 要改成数据驱动，得加 `GET /api/books/rating-titles`（对 `books` 做 `distinct` 聚合）。
  *
@@ -247,6 +350,12 @@ const CASCADER_PROPS = {
   checkStrictly: true,
   checkOnClickNode: true,
   emitPath: true,
+  // 2026-10-13：鼠标**悬停**到一级就展开二级，且**不选中任何一项**。
+  // 默认值是 'click' —— 本项目 `checkOnClickNode: true`，点一级会**选中**它，
+  // 于是「只想看看二级有哪些」必须先点一下（顺带把筛选条件改了），不好用。
+  // 改成 hover 后：悬停 = 只展开（node.vue 的 handleHoverExpand → handleExpand），
+  // 点击仍然照旧选中（handleClick 里 `checkOnClickNode && checkStrictly` 分支）。
+  expandTrigger: 'hover',
 }
 
 /** 「期刊杂志」的一级 code（后端 `CollectLoop.JOURNAL_CATEGORY_ID` 也是这个值） */
@@ -410,7 +519,8 @@ function applySortForCategory(journal: boolean): void {
  * ⚠️ 2026-10-12：用户把筛选栏里的「采集来源」项删了（他不关心 `collectSource`），
  * 只服务于它的 `targetOptions`（目标下拉候选）与 `handleTargetTypeChange`（切类型清目标）
  * 一并删除 —— 留着会被 `noUnusedLocals` 判为未使用，前端直接编译不过。
- * `query.targetType` / `query.targetId` 两个字段暂时保留：它们不报错，且 `load()` 仍会带上。
+ * 2026-10-13：`query.targetType` / `query.targetId` 也一并删了 —— 它们**只写不读**，
+ * 且 `toParams()` 会把空串 / undefined 跳过，所以从来没被发出去过（确认是死代码）。
  */
 
 /** `sourceKey`（"category:300000"）→ 「分类 · 文学」这样的人话 */
@@ -421,9 +531,13 @@ function sourceText(sourceKey?: string | null): string {
   const idx = sourceKey.indexOf(':')
   const type = idx > 0 ? sourceKey.slice(0, idx).toUpperCase() : ''
   const code = idx > 0 ? sourceKey.slice(idx + 1) : sourceKey
-  const dict = type === 'RANKING' ? rankings.value : categories.value
+  // ⚠️ 字典只有分类 / 榜单两种。不要用「不是榜单就当分类」的二元写法 ——
+  //    那样新增类型（如书单）时，它的来源会被静默显示成「分类」。
+  //    未知前缀（如 booklist）查不到字典，就原样回显 sourceKey，不假装知道。
+  const dict =
+    type === 'RANKING' ? rankings.value : type === 'CATEGORY' ? categories.value : []
   const hit = dict.find((t) => t.code === code)
-  const typeName = type === 'RANKING' ? '榜单' : '分类'
+  const typeName = targetTypeLabel(type)
   return hit ? `${typeName} · ${hit.name}` : sourceKey
 }
 
@@ -587,14 +701,17 @@ function handleReset(): void {
   query.maxRating = undefined
   query.minReadingCount = undefined
   query.newRatingTitle = undefined
-  query.targetType = ''
-  query.targetId = undefined
   query.title = undefined
   query.author = undefined
   query.minPublishTime = undefined
   query.maxPublishTime = undefined
   query.minCollectedAt = undefined
   query.maxCollectedAt = undefined
+  query.missing = undefined
+  query.booklistId = undefined
+  query.minTotalWords = undefined
+  query.enriched = undefined
+  query.paidCollect = undefined
   page.value = 1
   scheduleReload()
 }
@@ -783,11 +900,107 @@ async function confirmBatchDelete(): Promise<void> {
   }
 }
 
+/**
+ * 「完善书籍信息」（2026-10-16）。
+ *
+ * 用法：先用筛选条件「缺失信息」把缺字段的书筛出来 → 勾选当页 → 点这个按钮。
+ *
+ * ⚠️ 后端是**同步**长耗时调用（5 并发 + 每请求随机等 1~5 秒），一页可能要一两分钟。
+ * 所以既给 loading，也在确认框里提前讲清楚，免得用户以为卡死了。
+ */
+async function confirmEnrich(): Promise<void> {
+  const count = selectedRows.value.length
+  if (count === 0) {
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `将用平台的「书详情」接口补齐这 ${count} 本书的简介、分类等信息。` +
+        `只补空缺字段、不覆盖已有内容；只处理「采集时间是今天」的书，其余跳过。` +
+        `后端 5 并发、每个请求间隔 1~5 秒随机，可能要几分钟 —— 可以离开这一页，回来看进度还在。`,
+      '完善书籍信息',
+      { type: 'info', confirmButtonText: '开始补齐', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    // ⚠️ 提交即返回（不等它跑完），随后靠轮询看进度
+    enrichProgress.value = await enrichBooks(selectedRows.value.map((b) => b.bookId))
+    selectedRows.value = []
+    startEnrichPolling()
+  } catch {
+    // 拦截器已提示
+  }
+}
+
+function stopEnrichPolling(): void {
+  if (enrichTimer !== undefined) {
+    window.clearTimeout(enrichTimer)
+    enrichTimer = undefined
+  }
+}
+
+/**
+ * 拉一次进度；还在跑就 1.5 秒后再拉。
+ *
+ * 照 `views/booklist/index.vue` 同步书单那套 —— 是否继续轮询完全看后端的 `running`，
+ * 前端不自己猜时长。
+ */
+async function pollEnrich(): Promise<void> {
+  try {
+    const data = await getEnrichProgress()
+    enrichProgress.value = data
+    if (enrichWasRunning && !data.running) {
+      // 刚跑完：提示结果 + 刷新列表（补好的书会从「缺失信息」筛选里消失）
+      ElMessage.success(buildEnrichSummary(data))
+      await load()
+    }
+    enrichWasRunning = data.running
+    if (data.running) {
+      enrichTimer = window.setTimeout(pollEnrich, 1500)
+    }
+  } catch {
+    // 拦截器已提示；停止轮询，避免一直刷错误提示
+    enrichWasRunning = false
+  }
+}
+
+function startEnrichPolling(): void {
+  stopEnrichPolling()
+  enrichWasRunning = true
+  enrichTimer = window.setTimeout(pollEnrich, 800)
+}
+
+/** 把终态快照拼成一句话 */
+function buildEnrichSummary(p: EnrichResult): string {
+  const parts = [`补齐 ${p.updated} 本`]
+  if (p.derived > 0) {
+    parts.push(`本地派生分类 ${p.derived} 本`)
+  }
+  if (p.skipped > 0) {
+    parts.push(`跳过 ${p.skipped} 本`)
+  }
+  if (p.failed > 0) {
+    parts.push(`失败 ${p.failed} 本`)
+  }
+  const seconds = p.costMs > 0 ? (p.costMs / 1000).toFixed(1) : '0'
+  return `${parts.join('，')}（共 ${p.requested} 本，耗时 ${seconds} 秒）`
+}
+
+// 离开页面时停掉轮询，别让定时器在后台一直打接口
+onUnmounted(() => {
+  stopEnrichPolling()
+})
+
 // ---------------------------------------------------------------------------
 
 onMounted(() => {
   loadDict()
+  loadBooklistOptions()
   load()
+  // 挂载时拉一次补齐进度：页面刷新 / 从别处切回来时，能接着看到还在跑的任务
+  pollEnrich()
 })
 </script>
 
@@ -917,6 +1130,77 @@ onMounted(() => {
         </div>
       </el-form-item>
 
+      <!--
+        缺失信息筛选（2026-10-16）：无分类 / 无简介 / 无分类&无简介。
+        为什么要分三档：有些书**本身就没有分类**（平台没给它打标签），补齐也补不出来 ——
+        只有一个「无分类」档的话，这些书会永远留在筛选结果里，用户分不清
+        「是还没补」还是「根本补不出来」。
+        ⚠️ 选项值必须与后端 `BookQuery.resolveMissing()` 的白名单一致（大写）。
+      -->
+      <el-form-item label="缺失信息">
+        <el-select v-model="query.missing" clearable placeholder="全部">
+          <el-option
+            v-for="opt in BOOK_MISSING_OPTIONS"
+            :key="opt.value"
+            :label="opt.label"
+            :value="opt.value"
+          />
+        </el-select>
+      </el-form-item>
+
+      <!--
+        书单筛选（2026-10-16）：选项来自 GET /api/booklists/options（全量、不分页）。
+        与其它筛选条件是 AND。名称没回填时用 booklistId 兜底显示。
+      -->
+      <el-form-item label="书单" class="span-2">
+        <el-select
+          v-model="query.booklistId"
+          clearable
+          filterable
+          placeholder="全部书单"
+        >
+          <el-option
+            v-for="opt in booklistOptions"
+            :key="opt.booklistId"
+            :label="opt.name || opt.booklistId"
+            :value="opt.booklistId"
+          />
+        </el-select>
+      </el-form-item>
+
+      <!--
+        字数筛选（2026-10-16）：语义是 `totalWords >= 输入值`。
+        ⚠️ totalWords 来自 /book/info，只有「完善书籍信息」补过的书才有 ——
+        没补过的会被这个条件排除掉，这是数据决定的。
+      -->
+      <el-form-item label="字数">
+        <el-input-number
+          v-model="query.minTotalWords"
+          :min="0"
+          :controls="false"
+          placeholder="下限，不限则空"
+        />
+      </el-form-item>
+
+      <!--
+        补齐状态（2026-10-16）：区分「还没补」和「补过但补不出来」。
+        🔴 有的书平台本来就没有分类/简介，补也补不出来 —— 只用「缺失信息」筛的话，
+        它们会永远留在结果里，分不清是没补还是补不出来。
+        要拿「真正的待补清单」就选「缺失信息 = 无分类&无简介」再选「未补齐」。
+      -->
+      <el-form-item label="补齐状态">
+        <el-select v-model="query.enriched" clearable placeholder="全部">
+          <el-option label="未补齐" :value="false" />
+          <el-option label="已补齐" :value="true" />
+        </el-select>
+      </el-form-item>
+
+      <el-form-item label="付费精选">
+        <el-select v-model="query.paidCollect" clearable placeholder="全部">
+          <el-option label="是" :value="true" />
+          <el-option label="否" :value="false" />
+        </el-select>
+      </el-form-item>
 
     </SearchForm>
 
@@ -928,6 +1212,39 @@ onMounted(() => {
         （详见 `defaultSort` / `applySortForCategory` 的注释）。
         用户点表头改排序**不会**换 key，那时 el-table 自己管箭头。
       -->
+      <!--
+        补齐进度（2026-10-16）。后端是「提交即返回 + 轮询」，这里显示实时进度。
+        只有「正在跑」或「本次会话跑过」才显示 —— 从没跑过时后端回的是全零快照。
+      -->
+      <div
+        v-if="enrichProgress && (enrichRunning || enrichProgress.startedAtMs)"
+        class="enrich-progress"
+      >
+        <el-progress
+          :percentage="enrichPercent"
+          :status="
+            enrichRunning ? undefined : enrichProgress.failed > 0 ? 'warning' : 'success'
+          "
+        />
+        <div class="enrich-progress-msg">
+          {{ enrichProgress.message || '—' }}
+          · 已处理 {{ enrichProgress.processed }} / {{ enrichProgress.requested }}
+          <template v-if="enrichProgress.fetched > 0">
+            · 调接口
+            {{ enrichProgress.updated + enrichProgress.failed }} / {{ enrichProgress.fetched }}
+          </template>
+          <template v-if="enrichProgress.updated > 0">
+            · 补齐 {{ enrichProgress.updated }}
+          </template>
+          <template v-if="enrichProgress.derived > 0">
+            · 本地派生分类 {{ enrichProgress.derived }}
+          </template>
+          <template v-if="enrichProgress.failed > 0">
+            · 失败 {{ enrichProgress.failed }}
+          </template>
+        </div>
+      </div>
+
       <ProTable
         :key="tableKey"
         :data="rows"
@@ -935,7 +1252,7 @@ onMounted(() => {
         :total="total"
         :page="page"
         :size="size"
-        :page-sizes="[20, 50, 100]"
+        :page-sizes="[20, 50, 100, 500]"
         row-key="bookId"
         selectable
         :default-sort="defaultSort"
@@ -980,6 +1297,17 @@ onMounted(() => {
 
           <el-button
             v-if="selectedRows.length > 0"
+            type="primary"
+            plain
+            :disabled="enrichRunning"
+            @click="confirmEnrich"
+          >
+            <el-icon><MagicStick /></el-icon>
+            完善书籍信息（{{ selectedRows.length }}）
+          </el-button>
+
+          <el-button
+            v-if="selectedRows.length > 0"
             type="danger"
             :loading="deleting"
             @click="confirmBatchDelete"
@@ -1013,7 +1341,7 @@ onMounted(() => {
           v-if="cols.isVisible('title')"
           prop="title"
           label="书名"
-          min-width="180"
+          min-width="160"
           show-overflow-tooltip
         >
           <template #default="{ row }">
@@ -1027,7 +1355,7 @@ onMounted(() => {
           v-if="cols.isVisible('author')"
           prop="author"
           label="作者"
-          width="120"
+          width="100"
           show-overflow-tooltip
         >
           <template #default="{ row }">{{ dash(row.author) }}</template>
@@ -1042,7 +1370,7 @@ onMounted(() => {
           v-if="cols.isVisible('category')"
           prop="category"
           label="平台分类"
-          min-width="176"
+          min-width="156"
         >
           <template #default="{ row }">
             <div class="cat-cell">
@@ -1073,11 +1401,26 @@ onMounted(() => {
           </template>
         </el-table-column>
 
+        <!--
+          「评价标题」= 档位文案（神作 / 好评如潮 / 神作潜力 / 脍炙人口 / 值得一读 …），
+          2026-10-13 加、默认显示。它**不是数值列**，所以不给 sortable ——
+          `BookSortField` 白名单里也没有它。
+        -->
+        <el-table-column
+          v-if="cols.isVisible('newRatingTitle')"
+          prop="newRatingTitle"
+          label="评价标题"
+          width="84"
+          show-overflow-tooltip
+        >
+          <template #default="{ row }">{{ dash(row.newRatingTitle) }}</template>
+        </el-table-column>
+
         <el-table-column
           v-if="cols.isVisible('newRatingCount')"
           prop="newRatingCount"
           label="评价人数"
-          width="100"
+          width="92"
           align="right"
           sortable="custom"
         >
@@ -1090,7 +1433,7 @@ onMounted(() => {
           v-if="cols.isVisible('readingCount')"
           prop="readingCount"
           label="阅读人数"
-          width="100"
+          width="92"
           align="right"
           sortable="custom"
         >
@@ -1103,7 +1446,7 @@ onMounted(() => {
           v-if="cols.isVisible('publishTime')"
           prop="publishTime"
           label="出版时间"
-          width="100"
+          width="92"
           sortable="custom"
         >
           <!-- 库里存在 "2022" 这种只有年份的脏值，所以不能按时间格式化，只能原样显示 -->
@@ -1137,6 +1480,20 @@ onMounted(() => {
                 {{ s }}
               </el-tag>
             </template>
+            <span v-else class="text-muted">-</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column
+          v-if="cols.isVisible('paidCollect')"
+          label="付费精选"
+          width="90"
+          align="center"
+        >
+          <template #default="{ row }">
+            <el-tag v-if="row.paidCollect === 1" size="small" type="success" effect="plain">
+              付费
+            </el-tag>
             <span v-else class="text-muted">-</span>
           </template>
         </el-table-column>
@@ -1205,6 +1562,18 @@ onMounted(() => {
 </template>
 
 <style scoped>
+
+/* 完善书籍信息的进度条（2026-10-16） */
+.enrich-progress {
+  margin-bottom: 12px;
+}
+
+.enrich-progress-msg {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
 .page {
   display: flex;
   flex-direction: column;
@@ -1259,23 +1628,6 @@ onMounted(() => {
 .category-cascader {
   width: 100%;
 }
-.source-type {
-  width: 104px;
-  flex-shrink: 0;
-}
-.source-target {
-  flex: 1;
-  min-width: 0;
-}
-
-.query-hint {
-  grid-column: 1 / -1;
-  margin: -8px 0 8px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: #909399;
-}
-
 .toolbar-info {
   margin-left: auto;
   font-size: 12px;

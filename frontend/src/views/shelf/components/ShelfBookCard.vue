@@ -254,7 +254,7 @@ const bookStyle = computed<Record<string, string>>(() => ({
 .cover {
   position: relative;
   width: 100%;
-  /* 微信读书封面基本是 3:4，固定比例让网格对齐 */
+  /* 阅读平台封面基本是 3:4，固定比例让网格对齐 */
   aspect-ratio: 3 / 4;
   border-radius: 2px 5px 5px 2px;
   overflow: hidden;

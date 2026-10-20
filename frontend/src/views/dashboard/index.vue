@@ -669,7 +669,7 @@ const recentSummary = computed(() => {
           <span class="text-mono">{{ pingData.mdThreadId }}</span>
         </el-descriptions-item>
         <el-descriptions-item label="中文编码">
-          <span :class="{ bad: !pingData.chineseTest.includes('微信读书') }">
+          <span :class="{ bad: !pingData.chineseTest.includes('图书采集器') }">
             {{ pingData.chineseTest }}
           </span>
         </el-descriptions-item>

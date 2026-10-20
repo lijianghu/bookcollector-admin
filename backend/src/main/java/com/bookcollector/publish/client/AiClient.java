@@ -39,9 +39,9 @@ import java.util.Map;
  *
  * <h3>🔴 为什么自己建一个 {@code RestTemplate}，不复用 {@code wereadRestTemplate}</h3>
  * <ol>
- *   <li>那个 bean 上挂着 {@code WereadHeaderInterceptor}，会给<b>每个</b>请求注入微信读书的
+ *   <li>那个 bean 上挂着 {@code WereadHeaderInterceptor}，会给<b>每个</b>请求注入阅读平台的
  *       自定义 Header，还会带上 {@code Cookie}。发给 AI 接口属于无谓的信息外泄。</li>
- *   <li>那个 bean 的超时是「微信读书」的读数（{@code WereadProperties}），
+ *   <li>那个 bean 的超时是「阅读平台」的读数（{@code WereadProperties}），
  *       生成一篇解读要 30~120 秒，用它必然被截断。</li>
  *   <li>它的错误处理器是 {@code RawResponseErrorHandler}（包级私有，跨包也拿不到），
  *       而这里需要读错误响应体里的 {@code message} 才能给出可读的失败原因。</li>

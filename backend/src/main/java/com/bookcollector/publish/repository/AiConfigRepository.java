@@ -113,4 +113,24 @@ public class AiConfigRepository {
                 .with(Sort.by(Sort.Direction.ASC, "sort"));
         return mongoTemplate.find(q, AiTaxonomyItem.class);
     }
+
+    // ==================================================================
+    // pick_taxonomy_config（发布范围）
+    // ==================================================================
+
+    /** 发布范围白名单集合名（结构同 {@code ai_taxonomy_config}） */
+    private static final String PICK_TAXONOMY_COLLECTION = "pick_taxonomy_config";
+
+    /**
+     * 读「发布范围」白名单（集合 {@code pick_taxonomy_config}）。
+     *
+     * <p>规则（用户 2026-10-19 定）：{@code enabled = true}（严格等于 true，null / false 都不参与），
+     * 按 {@code sort} 正序。实体 {@link AiTaxonomyItem} 的 {@code @Document} 指向
+     * {@code ai_taxonomy_config}，这里用带 {@code collectionName} 的 {@code find} 重载读另一张同构表。
+     */
+    public List<AiTaxonomyItem> listEnabledPickTaxonomy() {
+        Query q = Query.query(Criteria.where("enabled").is(true))
+                .with(Sort.by(Sort.Direction.ASC, "sort"));
+        return mongoTemplate.find(q, AiTaxonomyItem.class, PICK_TAXONOMY_COLLECTION);
+    }
 }

@@ -63,9 +63,13 @@ public class BookRepository {
      * <p>这是整个采集链路的<b>唯一写入点</b>。语义：
      * <ul>
      *   <li>{@code bookId} 已存在 → 用新数据覆盖全部业务字段（以接口为真相），
-     *       {@code firstCollectedAt} <b>保留原值</b></li>
+     *       {@code firstCollectedAt} <b>保留原值</b>；{@code intro} 缺失时
+     *       <b>连 {@code $set} 都不进</b>（用户 2026-10-15 要求「不要覆盖成空」，
+     *       见 {@link #buildUpsertUpdate}）</li>
      *   <li>{@code bookId} 不存在 → 插入，并写入 {@code firstCollectedAt}</li>
      *   <li>{@code collectSource} 用 {@code $addToSet} 累加，同一来源不会重复</li>
+     *   <li>{@code bookLists} 同样用 {@code $addToSet} 累加 —— 一本书属于多个书单时全部保留，
+     *       且<b>不会</b>因为「后来被别的链路采到」而丢掉已有的书单引用</li>
      * </ul>
      *
      * <p><b>⚠️ 这里为什么不靠 {@code @CreatedDate} / {@code @LastModifiedDate} 审计</b>：
@@ -139,24 +143,152 @@ public class BookRepository {
 
         // _id 不能出现在 $set 里（MongoDB 会报 "Performing an update on the path '_id' would modify the immutable field '_id'"）
         setDoc.remove("_id");
-        // 这三个字段不能用 $set，单独处理：
+        // 这四个字段不能用 $set，单独处理：
         //   firstCollectedAt → 只在插入时写，更新时必须保留原值
         //   lastCollectedAt  → 每次都要覆盖
         //   collectSource    → 用 $addToSet 累加，和 $set 冲突
+        //   bookLists        → 同上：一本书属于多个书单，跨次累加，不能被 $set 覆盖
         setDoc.remove("firstCollectedAt");
         setDoc.remove("lastCollectedAt");
         setDoc.remove("collectSource");
+        setDoc.remove("bookLists");
         setDoc.put("lastCollectedAt", now);
+
+        // 🔴 intro 缺失 = 从 $set 里摘掉，不写库、更不覆盖已有值
+        // （2026-10-15 晚用户实测要求：「没有 intro 字段，这个字段没有的话不设置，
+        // 可为空；如果已有值，注意不要覆盖成空」）。
+        // 书单响应（拍平形态）里 intro 整个字段不存在，BookParser 解析成 null；
+        // 转换器会把 null 也写进 Document，于是 $set 带着 intro:null 把库里
+        // 已有的简介清成 null。接口没说「这本没有简介」，只是没给这个字段 ——
+        // 缺失时不该动库里那份。新插入的文档则没有这个键，读出来就是空简介。
+        // ⚠️ 刻意只摘 intro：「以接口为真相」的全量覆盖语义是设计的一部分，
+        //    别的字段照旧；将来哪个字段也要同样待遇，加一行即可，别改成通用逻辑。
+        if (setDoc.get("intro") == null) {
+            setDoc.remove("intro");
+        }
 
         Document updateDoc = new Document("$set", setDoc);
         updateDoc.put("$setOnInsert", new Document("firstCollectedAt", now));
 
+        // $addToSet 的两个字段合并成一次（同一个操作符只能出现一次）
+        Document addToSet = new Document();
         if (sourceKey != null && !sourceKey.trim().isEmpty()) {
-            updateDoc.put("$addToSet", new Document("collectSource",
-                    new Document("$each", Collections.singletonList(sourceKey.trim()))));
+            addToSet.put("collectSource",
+                    new Document("$each", Collections.singletonList(sourceKey.trim())));
+        }
+        List<Document> bookListRefDocs = toBookListRefDocs(book.getBookLists());
+        if (!bookListRefDocs.isEmpty()) {
+            addToSet.put("bookLists", new Document("$each", bookListRefDocs));
+        }
+        if (!addToSet.isEmpty()) {
+            updateDoc.put("$addToSet", addToSet);
         }
 
         return Update.fromDocument(updateDoc);
+    }
+
+    /**
+     * 「付费精选」专用写入（2026-10-20）：<b>不覆盖已有书籍的字段</b>。
+     *
+     * <ul>
+     *   <li>书<b>不存在</b> → 用解析出的全字段插入，并写 {@code paidCollect=1}；</li>
+     *   <li>书<b>已存在</b> → 只 {@code $addToSet collectSource} + {@code $set paidCollect=1}，
+     *       其它字段一律不动（含 {@code lastCollectedAt}）。</li>
+     * </ul>
+     */
+    public UpsertStat upsertPaidMany(List<Book> books, String sourceKey) {
+        if (books == null || books.isEmpty()) {
+            return UpsertStat.zero();
+        }
+        Date now = new Date();
+        BulkOperations bulk = mongoTemplate.bulkOps(BulkOperations.BulkMode.UNORDERED, Book.class);
+        int queued = 0;
+        int skipped = 0;
+        for (Book book : books) {
+            if (book == null || book.getBookId() == null || book.getBookId().trim().isEmpty()) {
+                skipped++;
+                continue;
+            }
+            Query query = Query.query(Criteria.where("bookId").is(book.getBookId().trim()));
+            bulk.upsert(query, buildPaidUpsertUpdate(book, now, sourceKey));
+            queued++;
+        }
+        if (skipped > 0) {
+            log.warn("upsertPaidMany 跳过 {} 条没有 bookId 的记录", skipped);
+        }
+        if (queued == 0) {
+            return UpsertStat.zero();
+        }
+        com.mongodb.bulk.BulkWriteResult result = bulk.execute();
+        return new UpsertStat(result.getMatchedCount(), result.getUpserts().size());
+    }
+
+    /**
+     * 付费精选的 upsert：{@code $setOnInsert} 写全字段，{@code $set} 只写 paidCollect，
+     * {@code $addToSet} 累加 collectSource。
+     *
+     * <p>⚠️ {@code paidCollect} <b>不能</b>同时出现在 {@code $set} 与 {@code $setOnInsert}
+     * （Mongo 会报路径冲突），所以只放在 {@code $set} 里 —— 插入时 {@code $set} 同样生效。
+     */
+    private Update buildPaidUpsertUpdate(Book book, Date now, String sourceKey) {
+        Document insertDoc = new Document();
+        mongoTemplate.getConverter().write(book, insertDoc);
+        insertDoc.remove("_id");
+        insertDoc.remove("collectSource");
+        insertDoc.remove("bookLists");
+        insertDoc.remove("firstCollectedAt");
+        insertDoc.remove("lastCollectedAt");
+        insertDoc.remove("paidCollect");
+        insertDoc.put("firstCollectedAt", now);
+        insertDoc.put("lastCollectedAt", now);
+
+        Document updateDoc = new Document("$setOnInsert", insertDoc);
+        updateDoc.put("$set", new Document("paidCollect", 1));
+        if (sourceKey != null && !sourceKey.trim().isEmpty()) {
+            updateDoc.put("$addToSet", new Document("collectSource", sourceKey.trim()));
+        }
+        return Update.fromDocument(updateDoc);
+    }
+
+    /**
+     * {@code Book.bookLists} → {@code $addToSet} 需要的 {@link Document} 列表。
+     *
+     * <h3>🔴 为什么必须手工转 Document，而不是让转换器去写</h3>
+     * <ol>
+     *   <li>{@code $addToSet} 是按<b>整个子文档</b>比较去重的，<b>键顺序也参与比较</b>。
+     *       所以这里显式按 {@code bookListId} → {@code bookListName} 的顺序 append
+     *       （{@code Document} 继承 {@code LinkedHashMap}，顺序保留），
+     *       不能指望「转换器碰巧也按这个顺序写」。</li>
+     *   <li>Mongo 驱动没有自定义 POJO 的 codec，直接塞 POJO 会在运行期抛
+     *       {@code CodecConfigurationException}（同一个坑见 {@code BooklistRepository}）。</li>
+     * </ol>
+     *
+     * <h3>两个兜底</h3>
+     * <ul>
+     *   <li><b>没有 ID 的元素丢弃</b>：没有 ID 的引用既不能按书单筛书也无法去重。</li>
+     *   <li><b>名称为空时用 ID 兜底</b>：{@code BookParser#buildBookListRefs} 已经兜过一次，
+     *       这里再兜一次是因为<b>写入侧才是「存进库里长什么样」的权威</b> ——
+     *       手工构造的 {@code Book} 也必须落到同一个形状，否则同一个书单会去重失败、
+     *       在数组里留下两条（{@code {id, null}} 和 {@code {id, "真名"}}）。</li>
+     * </ul>
+     */
+    private List<Document> toBookListRefDocs(List<Book.BookListRef> refs) {
+        List<Document> docs = new ArrayList<Document>();
+        if (refs == null || refs.isEmpty()) {
+            return docs;
+        }
+        for (Book.BookListRef ref : refs) {
+            if (ref == null || ref.getBookListId() == null
+                    || ref.getBookListId().trim().isEmpty()) {
+                continue;
+            }
+            String id = ref.getBookListId().trim();
+            String name = ref.getBookListName();
+            boolean nameMissing = name == null || name.trim().isEmpty();
+            docs.add(new Document("bookListId", id)
+                    .append("bookListName", nameMissing ? id : name.trim()));
+        }
+        return docs;
     }
 
     // ==================================================================
@@ -231,6 +363,37 @@ public class BookRepository {
 
         return PageQueryUtil.getPageResult(mongoTemplate, query.getSafePage(), query.getSafeSize(),
                 buildCriteria(query), Book.class, sort);
+    }
+
+    /**
+     * 按<b>书单 ID</b> 分页查这本书单里的书（书单详情弹窗用，2026-10-16 新增）。
+     *
+     * <p>匹配路径 {@code bookLists.bookListId} —— {@link Book#getBookLists()} 是
+     * {@code $addToSet} 累加的子文档数组，一本书属于多张书单时每个书单一条引用
+     * （同 {@link #upsertMany} 的写入语义）。MongoDB 对 {@code array.field: value}
+     * 的语义正是「数组里有任一元素的该字段等于 value」，与本需求精确对应，
+     * 不需要 {@code $elemMatch}。
+     *
+     * <p><b>为什么不再借道 {@code collectSource}</b>：那个字段记的是「本次被谁采到」
+     * （形如 {@code booklist:xxx}），而书单引用 {@code bookLists} 才是
+     * 「这本书属于哪张书单」的业务事实。语义上以后者为准。
+     *
+     * <p>排序口径与图书库列表默认一致（{@link BookQuery} 默认 {@code sortField=newRating}）：
+     * 评分降序 + {@code _id} 升序兜底，保证翻页不重不漏。
+     *
+     * <p>{@code booklistId} 空/空白时返回<b>空页</b>而不是抛异常 —— 读取侧放宽口径
+     * （同 {@code BookQuery}「非法值筛 0 条」），前端 URL 参数写错也不该变 500。
+     */
+    public PageResult<Book> pageByBooklistId(String booklistId, Integer page, Integer size) {
+        if (booklistId == null || booklistId.trim().isEmpty()) {
+            return PageResult.empty(PageQueryUtil.normalizePage(page), PageQueryUtil.normalizeSize(size));
+        }
+        Sort sort = Sort.by(Sort.Direction.DESC, "newRating")
+                .and(Sort.by(Sort.Direction.ASC, "_id"));
+        return PageQueryUtil.getPageResult(mongoTemplate,
+                PageQueryUtil.normalizePage(page), PageQueryUtil.normalizeSize(size),
+                Criteria.where("bookLists.bookListId").is(booklistId.trim()),
+                Book.class, sort);
     }
 
     /**
@@ -313,6 +476,49 @@ public class BookRepository {
         if (sourceKey != null) {
             conds.add(Criteria.where("collectSource").is(sourceKey));
         }
+        // 书单筛选（2026-10-16 新增）：bookLists 是 $addToSet 累加的子文档数组，
+        // MongoDB 对 `array.field: value` 的语义即「任一元素命中」，不需要 $elemMatch
+        // （同下面 pageByBooklistId 的写法）。
+        String booklistId = q.resolveBooklistId();
+        if (booklistId != null) {
+            conds.add(Criteria.where("bookLists.bookListId").is(booklistId));
+        }
+        // 字数下限（2026-10-16 新增）：totalWords 是整数，来自 /book/info（补过的书才有）
+        if (q.getMinTotalWords() != null) {
+            conds.add(Criteria.where("totalWords").gte(q.getMinTotalWords()));
+        }
+        // 补齐状态（2026-10-16 新增）：enrichedAt 存在 = 被「完善书籍信息」碰过。
+        // ⚠️ `{field: null}` 同时匹配「值是 null」与「字段不存在」，所以
+        //    is(null) = 从没补过；`$ne: null` = 存在且非 null = 补过。
+        if (Boolean.TRUE.equals(q.getEnriched())) {
+            conds.add(Criteria.where("enrichedAt").ne(null));
+        } else if (Boolean.FALSE.equals(q.getEnriched())) {
+            conds.add(Criteria.where("enrichedAt").is(null));
+        }
+        // 付费精选（2026-10-20）：paidCollect = 1 表示来自付费精选采集。
+        // true = 只要付费精选；false = 排除（$ne 1 同时匹配 null / 字段不存在）。
+        if (Boolean.TRUE.equals(q.getPaidCollect())) {
+            conds.add(Criteria.where("paidCollect").is(1));
+        } else if (Boolean.FALSE.equals(q.getPaidCollect())) {
+            conds.add(Criteria.where("paidCollect").ne(1));
+        }
+        // 缺失字段筛选（2026-10-16 新增）：CATEGORY / INTRO / BOTH。
+        // 🔴 MongoDB 里 `{field: null}` **同时**匹配「值是 null」和「整个字段不存在」
+        // 两种形态（同上面 newRatingTitle 的「暂无评级」，2026-10-12 已实测是同一批文档）。
+        // 空串另加一条：cleanValue 入库时会把空串转成 null，但人工编辑可能留下 ""。
+        String missing = q.resolveMissing();
+        if (missing != null) {
+            if ("CATEGORY".equals(missing) || "BOTH".equals(missing)) {
+                conds.add(new Criteria().orOperator(
+                        Criteria.where("category").is(null),
+                        Criteria.where("category").is("")));
+            }
+            if ("INTRO".equals(missing) || "BOTH".equals(missing)) {
+                conds.add(new Criteria().orOperator(
+                        Criteria.where("intro").is(null),
+                        Criteria.where("intro").is("")));
+            }
+        }
 
         if (conds.isEmpty()) {
             return new Criteria();
@@ -332,7 +538,7 @@ public class BookRepository {
      *
      * <h3>为什么是「局部更新」而不是整本 {@code save()}</h3>
      * 界面上的编辑抽屉只让改十来个字段（书名/作者/简介/分类归属…）。
-     * 如果走整本 {@code save()}，前端就得把 46 个字段一个不落地回传 ——
+     * 如果走整本 {@code save()}，前端就得把全部字段一个不落地回传 ——
      * 少传一个，那个字段就被写成 null。这是「隐式清空」，是最难发现的一类数据损坏。
      * 局部更新只碰调用方明确给到的字段。
      *

@@ -25,7 +25,7 @@ import type { PublishJobVO } from '@/types'
  * <p>理由：候选清单有 4800+ 条，是个**重列表页**；而本页是**轻控制台**
  * （改 cron、点两个按钮、看进度）。挤在一起时，配置区会被表格淹掉。
  *
- * <p>本页保留：生成配置（cron / 启用 / 下次触发 / 候选范围 / 当前模型）、
+ * <p>本页保留：生成配置（cron / 启用 / 下次触发 / 发布范围 / 当前模型）、
  * <b>候选池统计</b>（待解读 / 生成中 / 已发布 / 失败 / 总数）、
  * 清空未解读、生成并发布，以及**跳转精选图书的入口**。
  *
@@ -300,7 +300,7 @@ onUnmounted(stopPoll)
           <span v-if="job && !job.enabled" class="hint inline">（定时未启用）</span>
         </el-form-item>
 
-        <el-form-item label="候选范围">
+        <el-form-item label="发布范围">
           <div class="target-list">
             <template v-if="job && job.categoryNames.length">
               <el-tag
@@ -313,11 +313,7 @@ onUnmounted(stopPoll)
                 {{ name }}
               </el-tag>
             </template>
-            <span v-else class="hint">分类白名单为空（在 ai_taxonomy_config 表里维护）</span>
-          </div>
-          <div class="hint">
-            候选 = 上面这些分类的书，且评级属于「神作 / 好评如潮 / 神作潜力 / 脍炙人口 / 值得一读」，且评价人数超过 500。
-            白名单只取<b>一级分类</b>（二级分类的书本来就会带上所属一级分类，所以选一级不会漏）。
+            <span v-else class="hint">发布范围为空（在 pick_taxonomy_config 表里维护）</span>
           </div>
         </el-form-item>
 
@@ -335,7 +331,7 @@ onUnmounted(stopPoll)
           </el-button>
           <el-button :loading="loading" @click="load()">
             <el-icon><Refresh /></el-icon>
-            {{ running ? '刷新进度' : '刷新' }}
+            {{ running ? '刷新进度' : '刷新model' }}
           </el-button>
           <span v-if="dirty" class="hint inline dirty">配置有改动，别忘了点「保存配置」</span>
         </el-form-item>
@@ -415,10 +411,6 @@ onUnmounted(stopPoll)
         </el-descriptions-item>
       </el-descriptions>
 
-      <div class="hint summary-hint">
-        清单明细（筛选 / 批量删除 / 重置为待解读）在
-        <el-link type="primary" :underline="false" @click="goFeatured">精选图书</el-link>。
-      </div>
     </el-card>
   </div>
 </template>

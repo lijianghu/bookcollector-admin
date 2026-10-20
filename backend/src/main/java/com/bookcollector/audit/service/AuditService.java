@@ -1,5 +1,8 @@
 package com.bookcollector.audit.service;
 
+import com.bookcollector.audit.dto.ReplayRequest;
+import com.bookcollector.audit.dto.ReplayResult;
+import com.bookcollector.audit.dto.RequestDetail;
 import com.bookcollector.audit.dto.RequestSummary;
 import com.bookcollector.audit.entity.ApiRequest;
 import com.bookcollector.common.PageResult;
@@ -43,4 +46,36 @@ public interface AuditService {
      * @param onlyFailed true = 只看失败（{@code statusCode != 200} 或 errorMsg 非空）
      */
     RequestSummary summary(String runId, String targetType, String targetId, Boolean onlyFailed);
+
+    /**
+     * 单条详情：审计记录 + 它所属运行的步骤日志（2026-10-15 新增）。
+     *
+     * <p>给「一次请求为什么采到 0 条」做最终定位用：记录回答「接口返了什么」，
+     * 日志回答「主循环当时进行到哪一步、有没有报错」。两者一起才分得清
+     * 「数据访问问题」（接口没给数据）与「解析问题」（给了没解析出来）。
+     *
+     * @param id 审计记录 ID
+     * @throws com.bookcollector.common.BizException 记录不存在（404 语义）
+     */
+    RequestDetail findDetail(String id);
+
+    /**
+     * 「回放」：用最原始的 HTTP 按<b>提交的请求</b>再发一次（2026-10-15 晚新增，当晚 redesign）。
+     *
+     * <p>用户诉求演进：「做一个『回放』按钮，后端使用最原始的 http 再次请求」→
+     * 「url、参数和请求头都可以修改，按本次最新值发起请求，不用落库，只展示」。
+     * 所以入参是这次要发的请求（{@link ReplayRequest}），不是记录 ID ——
+     * 排查时最常做的就是拿当时那个请求改个参数试试。
+     *
+     * <p>三点口径：
+     * <ul>
+     *   <li>URL 是唯一真相：弹窗里的「参数」行是 query 的可编辑视图，后端不单独收 params</li>
+     *   <li>skey 不信任入参（掩码值）：书单域名强制取当前内存凭证，其余域名发了也替换</li>
+     *   <li>body 原样返回，不过 fastjson、不重序列化；<b>不写审计</b></li>
+     * </ul>
+     *
+     * @param req 这次要发的请求
+     * @throws com.bookcollector.common.BizException URL 为空；或书单域名但凭证八项缺一
+     */
+    ReplayResult replay(ReplayRequest req);
 }

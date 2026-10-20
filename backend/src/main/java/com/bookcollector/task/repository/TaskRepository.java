@@ -85,6 +85,16 @@ public class TaskRepository {
                 CollectTask.class);
     }
 
+    /** 按目标查任务（{@code uk_target} 保证最多一条）。没找到返回 null */
+    public CollectTask findByTarget(String targetType, String targetId) {
+        if (targetType == null || targetId == null) {
+            return null;
+        }
+        return mongoTemplate.findOne(
+                Query.query(Criteria.where("targetType").is(targetType).and("targetId").is(targetId)),
+                CollectTask.class);
+    }
+
     /**
      * 局部更新任务的配置字段（编辑任务用）。
      *

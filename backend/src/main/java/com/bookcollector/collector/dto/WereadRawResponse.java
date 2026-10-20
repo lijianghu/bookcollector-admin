@@ -4,6 +4,8 @@ import lombok.Builder;
 import lombok.Getter;
 import lombok.ToString;
 
+import java.util.Map;
+
 /**
  * 一次原始请求的结果。不抛异常，把成功/失败都装进来，由调用方决定怎么处理。
  */
@@ -26,6 +28,22 @@ public class WereadRawResponse {
 
     /** 失败原因；成功时为 null */
     private final Throwable error;
+
+    /**
+     * URL 上的 query 参数（key→value，原样编码态）—— 审计详情用。
+     *
+     * <p>构造不出 URL（凭证没配）时为 {@code null} —— 那时连 URL 都没有，
+     * 拆参数无从谈起。成功发出与请求异常两个分支都会填。
+     */
+    private final Map<String, String> queryParams;
+
+    /**
+     * 请求头快照 —— 审计详情用。🔴 {@code skey} 是<b>掩码值</b>（前 2 位 + ****），
+     * 明文绝不离开 {@link com.bookcollector.collector.WereadHeaders#appHeaders}。
+     *
+     * <p>构造不出 URL 时为 {@code null}（域名未知，无法判断该用哪套头）。
+     */
+    private final Map<String, String> requestHeaders;
 
     public boolean isSuccess() {
         return error == null && statusCode == 200 && body != null;

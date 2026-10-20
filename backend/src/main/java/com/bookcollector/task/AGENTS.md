@@ -78,7 +78,7 @@ TaskService(Impl) ──┬──► TaskRepository ──► collect_tasks / ru
                     └──► TaskRunner.run(task, run, handle)  ─── 提交到线程池
                               │  @Async("collectExecutor")
                               ▼
-                         CollectLoop ──► WereadClient ──► 微信读书
+                         CollectLoop ──► WereadClient ──► 阅读平台
                               │              │
                               │              └──► ApiRequestRepository ──► api_requests
                               ├──► BookWriter ──► BookRepository ──► books

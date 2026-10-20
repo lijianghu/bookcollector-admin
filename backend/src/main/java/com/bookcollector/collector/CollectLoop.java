@@ -11,6 +11,7 @@ import com.bookcollector.common.enums.TargetType;
 import com.bookcollector.config.WereadProperties;
 import com.bookcollector.cursor.entity.CollectCursor;
 import com.bookcollector.cursor.repository.CursorStore;
+import com.bookcollector.taxonomy.repository.TaxonomyRepository;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +19,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.YearMonth;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -80,6 +82,7 @@ public class CollectLoop {
     private final ProgressReporter progress;
     private final ApiRequestRepository audit;
     private final WereadProperties props;
+    private final TaxonomyRepository taxonomyRepository;
     private final SimpleRateLimiter rateLimiter;
     private final boolean auditEnabled;
 
@@ -90,7 +93,8 @@ public class CollectLoop {
                        CursorStore cursorStore,
                        ProgressReporter progress,
                        ApiRequestRepository audit,
-                       WereadProperties props) {
+                       WereadProperties props,
+                       TaxonomyRepository taxonomyRepository) {
         this.client = client;
         this.parser = parser;
         this.writer = writer;
@@ -99,6 +103,7 @@ public class CollectLoop {
         this.progress = progress;
         this.audit = audit;
         this.props = props;
+        this.taxonomyRepository = taxonomyRepository;
         // 限速器按配置构造（SimpleRateLimiter 不是 Spring bean，因为它是有状态的）
         this.rateLimiter = new SimpleRateLimiter(props.getRateLimitPerSecond());
         this.auditEnabled = props.isAuditEnabled();
@@ -120,13 +125,19 @@ public class CollectLoop {
         CollectControl control = cmd.controlOrDefault();
         int maxPages = cmd.effectiveMaxPages();
 
-        // 排除分类（任务级黑名单）。空集时下游 filter 直接原样返回，等价于「不过滤」，
-        // 所以这里不需要再判断「要不要过滤」。
-        Set<String> excludedCodes = cmd.excludeCategoriesOrEmpty();
+        // 排除分类 = 任务级黑名单 + taxonomy_config 里 enabled=false 的全局黑名单。
+        // 用户 2026-10-19：采集到的新书，若 code 在 taxonomy_config 的 enabled=false，则忽略。
+        // 空集时下游 filter 直接原样返回，等价于「不过滤」，所以不用再判断「要不要过滤」。
+        Set<String> excludedCodes = new LinkedHashSet<String>(cmd.excludeCategoriesOrEmpty());
+        Set<String> disabledCodes = taxonomyRepository.findDisabledCodes(TargetType.CATEGORY);
+        if (!disabledCodes.isEmpty()) {
+            excludedCodes.addAll(disabledCodes);
+        }
         if (!excludedCodes.isEmpty()) {
-            log.info("本次采集排除分类：{}（命中任一标签的图书不写库）", excludedCodes);
+            log.info("本次采集排除分类 {} 条（任务级 {} + 全局停用 {}，命中任一标签的图书不写库）",
+                    excludedCodes.size(), cmd.excludeCategoriesOrEmpty().size(), disabledCodes.size());
             progress.info(cmd.getRunId(), cmd.getTaskId(),
-                    "排除分类 " + excludedCodes + "（命中的图书不写库）");
+                    "排除分类 " + excludedCodes.size() + " 条（命中的图书不写库）");
         }
 
         // 期刊杂志只采本月（历史期号没必要采）。判据是书自己
@@ -231,7 +242,25 @@ public class CollectLoop {
                 }
 
                 // ---- 6. 解析 + 过滤 + 落库 ----
-                List<Book> parsed = parser.parseAll(pageData.getBooks());
+                // ★ 带上信封里的书单 ID/名称：书单链路要用它给每本书打「属于哪个书单」的标记
+                //   （Book.bookLists）。列表/榜单响应里这两个是 null，等价于旧行为。
+                List<Book> parsed = parser.parseAll(pageData.getBooks(),
+                        pageData.getBooklistId(), pageData.getBooklistName());
+                // 🔴 信封里有记录、却一本都没解析出来 —— 这绝不是「正常采完」。
+                // 2026-10-15 实测：书单 248192711_7oMs4EyW3 的 499 条记录全部被逐条跳过，
+                // 任务却显示「成功、新增 0 本」—— 和 tag 编错、「第 1 页当空页」
+                // 「错误信封当空页」属于同一类静默失败。
+                // 判据用 parsed（过滤前）：排除分类把书全滤掉是用户配置的正常行为，
+                // 不该报错；解析不出书才是链路坏了。
+                // ⚠️ 书单缺 bookInfo 已<b>不再</b>是失败原因（BookParser 两种形态都收）。
+                if (parsed.isEmpty()) {
+                    errorMsg = "第 " + pageNo + " 页：响应含 " + pageData.size()
+                            + " 条记录，但一本都没解析出来（单条跳过原因见后端日志 BookParser）；"
+                            + "这通常是接口形状变了，不是「没有数据」";
+                    log.error("{}（{} / {} maxIndex={}）", errorMsg, type, targetId, maxIndex);
+                    progress.error(cmd.getRunId(), cmd.getTaskId(), errorMsg);
+                    break;
+                }
                 // ★ 排除分类在这里生效：过滤掉的书「解析到了但不写库」。
                 //   放在 upsert 之前而不是之后 —— 写进去再删要多一次写库，
                 //   而且中间那一瞬用户能在图书库里看到它们。

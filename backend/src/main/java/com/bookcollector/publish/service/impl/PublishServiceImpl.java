@@ -17,6 +17,7 @@ import com.bookcollector.publish.entity.PublishRecord;
 import com.bookcollector.publish.entity.PublishStatus;
 import com.bookcollector.publish.entity.SensitiveWord;
 import com.bookcollector.publish.prompt.InterpretationPrompt;
+import com.bookcollector.publish.req.CandidateBuildRequest;
 import com.bookcollector.publish.req.InterpretationQuery;
 import com.bookcollector.publish.repository.AiConfigRepository;
 import com.bookcollector.publish.repository.InterpretationRepository;
@@ -24,6 +25,7 @@ import com.bookcollector.publish.repository.PublishJobRepository;
 import com.bookcollector.publish.repository.PublishRecordRepository;
 import com.bookcollector.publish.repository.SensitiveWordRepository;
 import com.bookcollector.publish.service.PublishService;
+import com.bookcollector.publish.vo.CandidateBookVO;
 import com.bookcollector.publish.vo.InterpretationVO;
 import com.bookcollector.publish.vo.PublishJobVO;
 
@@ -224,7 +226,8 @@ public class PublishServiceImpl implements PublishService {
         // 代价可忽略；换来的是「改完配置刷新页面就生效」，不需要重启。
         AiModel model = aiConfigRepository.loadEnabledModel();
         AiYuqueToken token = aiConfigRepository.loadYuqueToken();
-        List<AiTaxonomyItem> taxonomy = aiConfigRepository.listEnabledTaxonomy();
+        // 「发布范围」来自 pick_taxonomy_config（不再用 ai_taxonomy_config）
+        List<AiTaxonomyItem> taxonomy = aiConfigRepository.listEnabledPickTaxonomy();
 
         List<String> names = new ArrayList<String>();
         for (AiTaxonomyItem item : taxonomy) {
@@ -317,6 +320,196 @@ public class PublishServiceImpl implements PublishService {
         PublishJob saved = jobRepository.saveConfig(cron, enabled);
         log.info("AI 书籍解读配置已更新：cron={}，enabled={}", saved.getCron(), saved.getEnabled());
         return getJob();
+    }
+
+    // ==================================================================
+    // 精选配置（2026-10-12 新增）
+    // ==================================================================
+
+    @Override
+    public PageResult<CandidateBookVO> previewCandidates(CandidateBuildRequest req,
+                                                         Integer page, Integer size) {
+        validateBuildRequest(req);
+        PageResult<Document> raw = interpretationRepository.pageCandidateBooks(req, page, size);
+        List<CandidateBookVO> list = new ArrayList<CandidateBookVO>();
+        for (Document doc : raw.getList()) {
+            list.add(CandidateBookVO.from(doc));
+        }
+        return PageResult.of(list, raw.getTotal(), raw.getPage(), raw.getSize());
+    }
+
+    @Override
+    public PublishJobVO collectCandidates(CandidateBuildRequest req) {
+        validateBuildRequest(req);
+        boolean all = req.all();
+        List<String> bookIds = req.resolveBookIds();
+        if (!all && bookIds.isEmpty()) {
+            throw new BizException(ResultBean.code_warn, "没有选中任何图书（批量精选至少要勾一行）");
+        }
+        // 与「重置精选」共用互斥位与线程池：两者都在写候选清单，同时跑会互相踩，
+        // 而且进度字段是同一组（initScanned / initInserted），分开计数会让页面上的数字跳来跳去
+        if (!initRunning.compareAndSet(false, true)) {
+            throw new BizException(ResultBean.code_warn, "候选清单正在初始化中，请等它跑完再试");
+        }
+        // 立刻发布一份「刚起步」的空快照：页面此刻轮询过来应该看到 0/0/0
+        publishInit(new InitProgress(0, 0));
+        try {
+            initExecutor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        doCollect(req, all, bookIds);
+                    } finally {
+                        initRunning.set(false);
+                    }
+                }
+            });
+        } catch (RuntimeException e) {
+            initRunning.set(false);
+            log.error("AI 书籍解读：提交精选线程失败", e);
+            throw new BizException(ResultBean.code_warn, "初始化线程池繁忙，本次未能启动，请稍后重试");
+        }
+        log.info("AI 书籍解读：已提交{}", all ? "全部精选" : ("批量精选 " + bookIds.size() + " 本"));
+        return getJob();
+    }
+
+    /**
+     * 校验「精选配置」的筛选条件。
+     *
+     * <p>两条约束：
+     * <ol>
+     *   <li><b>平台分类必选</b>（用户 2026-10-12 明确要求，前端默认全选）；</li>
+     *   <li>除分类外<b>至少给一个条件</b> —— 评价标签 / 推荐值下限 / 书名 / 作者。
+     *       没有它的话「全部精选」就等于「把整个图书库搬进候选清单」。</li>
+     * </ol>
+     *
+     * <p>前端按「评论标题后」「推荐值后」「搜索」三个入口分别做提示，
+     * 这里做的是<b>兜底</b>校验 —— 直接调接口时也要挡得住。
+     */
+    private static void validateBuildRequest(CandidateBuildRequest req) {
+        if (req == null) {
+            throw new BizException(ResultBean.code_warn, "缺少筛选条件");
+        }
+        if (req.resolveCategoryIds().isEmpty()) {
+            throw new BizException(ResultBean.code_warn, "请至少选择一个平台分类");
+        }
+        if (!req.hasFilterBeyondCategory()) {
+            throw new BizException(ResultBean.code_warn,
+                    "请至少给出一个筛选条件（评价标签 / 推荐值下限 / 书名 / 作者）");
+        }
+    }
+
+    /**
+     * 精选的执行体：把命中的书快照进候选清单。
+     *
+     * <p>同 {@link #doInit()}，<b>不抛异常</b> —— 异常穿透出去只会变成线程池里
+     * 一条没人看的堆栈，页面上的进度会永远停在半路。
+     *
+     * @param all     {@code true} = 按条件全量扫；{@code false} = 只处理 {@code bookIds}
+     * @param bookIds 批量精选的 bookId（{@code all = true} 时忽略）
+     */
+    private void doCollect(CandidateBuildRequest req, boolean all, List<String> bookIds) {
+        long startedAt = System.currentTimeMillis();
+        try {
+            int scanned = 0;
+            int inserted = 0;
+            int batchSize = Math.max(1, interpretationRepository.batchSize());
+            List<Document> batch = new ArrayList<Document>(batchSize);
+            Date now = new Date();
+
+            if (all) {
+                log.info("AI 书籍解读：开始全部精选，分类 {}，评级 {}，推荐值下限 {}，隐藏已精选 {}",
+                        req.resolveCategoryIds(), req.resolveRatingTitles(),
+                        req.resolveMinRatingValue(), req.excludeCollected());
+                CloseableIterator<Document> it = interpretationRepository.streamCandidateBooks(req);
+                try {
+                    while (it.hasNext()) {
+                        Document doc = it.next();
+                        if (doc == null) {
+                            continue;
+                        }
+                        scanned++;
+                        toCandidateSnapshot(doc, now);
+                        batch.add(doc);
+                        if (batch.size() >= batchSize) {
+                            inserted += interpretationRepository.upsertSnapshot(batch);
+                            batch.clear();
+                            publishInit(new InitProgress(scanned, inserted));
+                        }
+                    }
+                    if (!batch.isEmpty()) {
+                        inserted += interpretationRepository.upsertSnapshot(batch);
+                        batch.clear();
+                        publishInit(new InitProgress(scanned, inserted));
+                    }
+                } finally {
+                    // ⚠️ 流式游标必须关，否则连接一直占着
+                    it.close();
+                }
+            } else {
+                log.info("AI 书籍解读：开始批量精选 {} 本", bookIds.size());
+                // 一次取回（当页最多 200 本，分片 $in 在 Repository 里做），再按批 upsert。
+                // 返回条数可能少于请求条数：有的 bookId 已经不在图书库了（被清理过）。
+                List<Document> docs = interpretationRepository.findBooksByIds(bookIds);
+                for (Document doc : docs) {
+                    if (doc == null) {
+                        continue;
+                    }
+                    scanned++;
+                    toCandidateSnapshot(doc, now);
+                    batch.add(doc);
+                    if (batch.size() >= batchSize) {
+                        inserted += interpretationRepository.upsertSnapshot(batch);
+                        batch.clear();
+                        publishInit(new InitProgress(scanned, inserted));
+                    }
+                }
+                if (!batch.isEmpty()) {
+                    inserted += interpretationRepository.upsertSnapshot(batch);
+                    batch.clear();
+                }
+            }
+
+            publishInit(new InitProgress(scanned, inserted));
+            String msg = (all ? "全部精选" : "批量精选") + "完成：扫描 " + scanned + " 本，新增 "
+                    + inserted + " 条，跳过 " + (scanned - inserted) + " 条（已在清单中）";
+            jobRepository.markFinished(RUN_OK, msg, new Date());
+            log.info("AI 书籍解读：{}（耗时 {} ms）", msg, System.currentTimeMillis() - startedAt);
+
+        } catch (Throwable t) {
+            String msg = "精选失败：" + brief(t);
+            log.error("AI 书籍解读：精选失败", t);
+            try {
+                jobRepository.markFinished(RUN_FAILED, msg, new Date());
+            } catch (Exception e) {
+                log.error("AI 书籍解读：写精选失败状态时又出错", e);
+            }
+            InitProgress cur = liveInit.get();
+            publishInit(cur == null ? new InitProgress(0, 0) : cur);
+        }
+    }
+
+    /**
+     * 把一份 {@code books} 的原始文档改造成候选清单的快照文档。
+     *
+     * <p>三件事（用户 2026-10-09 定的口径）：
+     * <ol>
+     *   <li>剥掉 {@code _class} —— Spring Data 的类型标记，带过去会污染集合
+     *       （{@code books} 里的文档确实带它，见 {@code InterpretationRepository} 的类注释）；</li>
+     *   <li>补 {@code status = PENDING}；</li>
+     *   <li>补三个时间戳。</li>
+     * </ol>
+     *
+     * <p>抽成方法是为了让「重置精选」（{@link #doInit()}）与「精选配置」
+     * （{@link #doCollect}）两条写入路径<b>共用同一份口径</b> ——
+     * 分头写的话，以后加一个快照字段只改一处，两边就会悄悄不一致。
+     */
+    private static void toCandidateSnapshot(Document doc, Date now) {
+        doc.remove("_class");
+        doc.put("status", PublishStatus.PENDING.name());
+        doc.put("initializedAt", now);
+        doc.put("createdAt", now);
+        doc.put("updatedAt", now);
     }
 
     // ==================================================================
@@ -427,13 +620,9 @@ public class PublishServiceImpl implements PublishService {
                         continue;
                     }
                     scanned++;
-                    // ★ 用户要求「快照所有字段，除了 _class」——
-                    //   _class 是 Spring Data 的类型标记，带过来会污染集合
-                    doc.remove("_class");
-                    doc.put("status", PublishStatus.PENDING.name());
-                    doc.put("initializedAt", now);
-                    doc.put("createdAt", now);
-                    doc.put("updatedAt", now);
+                    // ★ 用户要求「快照所有字段，除了 _class」——口径与「精选配置」共用，
+                    //   见 toCandidateSnapshot 的注释
+                    toCandidateSnapshot(doc, now);
                     batch.add(doc);
 
                     if (batch.size() >= batchSize) {
@@ -587,7 +776,16 @@ public class PublishServiceImpl implements PublishService {
         try {
             // ---- 1. 挑书 ----
             publishGen(new GenProgress("正在挑选图书", null, startedAt.getTime(), "正在挑选待解读的图书…"));
-            Interpretation target = interpretationRepository.pickOnePending();
+            // 🔴 发布范围：只从 pick_taxonomy_config 里 enabled=true 的一级分类挑书
+            List<Integer> pickCategoryIds = resolvePickCategoryIds();
+            if (pickCategoryIds.isEmpty()) {
+                String msg = "发布范围为空（pick_taxonomy_config 里没有 enabled=true 的一级分类），本次不发布";
+                publishGen(new GenProgress(null, null, startedAt.getTime(), msg));
+                jobRepository.markFinished(RUN_SKIPPED, msg, new Date());
+                log.info("AI 书籍解读：{}", msg);
+                return;
+            }
+            Interpretation target = interpretationRepository.pickOnePending(pickCategoryIds);
             if (target == null) {
                 String msg = EMPTY_QUEUE_MESSAGE;
                 publishGen(new GenProgress(null, null, startedAt.getTime(), msg));
@@ -671,7 +869,7 @@ public class PublishServiceImpl implements PublishService {
             // ---- 7.5 写发布记录（2026-10-10 新增）----
             // 与候选清单分表：候选清单一本只有一行、状态会被覆盖，
             // 而「发布记录」是流水账（同一本可以发多次）。
-            writePublishRecord(target, localPath, doc, completion, rep.hits.size(), trigger, finishedAt);
+            writePublishRecord(target, localPath, doc, completion, rep.hits, trigger, finishedAt);
 
             String msg = "《" + nvl(bookTitle) + "》解读已发布到语雀"
                     + (rep.hits.isEmpty() ? "" : "（合规替换 " + rep.hits.size() + " 个词）");
@@ -727,7 +925,7 @@ public class PublishServiceImpl implements PublishService {
      * 代价是流水可能缺行（日志里有 ERROR，可以事后补）。
      */
     private void writePublishRecord(Interpretation target, String localPath, YuqueDoc doc,
-                                    AiCompletion completion, int sensitiveHitCount,
+                                    AiCompletion completion, List<String> sensitiveHits,
                                     String trigger, Date publishedAt) {
         try {
             PublishRecord record = new PublishRecord();
@@ -744,7 +942,10 @@ public class PublishServiceImpl implements PublishService {
             record.setModel(completion.getModel());
             record.setPromptTokens(completion.getPromptTokens());
             record.setCompletionTokens(completion.getCompletionTokens());
-            record.setSensitiveHitCount(sensitiveHitCount);
+            // 个数与**原词列表**一起落（2026-10-13）：页面「合规替换」那一列点开要看替换了哪些词。
+            // 列表可能为空数组（没命中），但不会是 null。
+            record.setSensitiveHitCount(sensitiveHits == null ? 0 : sensitiveHits.size());
+            record.setSensitiveHits(sensitiveHits);
             record.setTrigger(trigger);
             record.setPublishedAt(publishedAt);
             record.setCreatedAt(publishedAt);
@@ -768,6 +969,41 @@ public class PublishServiceImpl implements PublishService {
             throw new BizException(ResultBean.code_notfound, "清单里没有这本书：" + bookId);
         }
         log.info("AI 书籍解读：已把 {} 重置为待解读", bookId);
+        return true;
+    }
+
+    /**
+     * 「重置为」的通用入口（2026-10-16 新增）。白名单只放 PENDING / PUBLISHED
+     * 两个状态，理由见 {@code InterpretationRepository#resetStatus}：
+     * GENERATING 必须由挑书流程设置（手设即成假死），FAILED 必须带 errorMsg。
+     */
+    @Override
+    public boolean resetTo(String bookId, String statusRaw) {
+        if (bookId == null || bookId.trim().isEmpty()) {
+            throw new BizException(ResultBean.code_warn, "缺少 bookId");
+        }
+        // null/空 = PENDING：老调用（不带 status 参数）行为完全不变
+        PublishStatus target;
+        if (statusRaw == null || statusRaw.trim().isEmpty()) {
+            target = PublishStatus.PENDING;
+        } else {
+            String v = statusRaw.trim().toUpperCase();
+            if ("PENDING".equals(v)) {
+                target = PublishStatus.PENDING;
+            } else if ("PUBLISHED".equals(v)) {
+                target = PublishStatus.PUBLISHED;
+            } else {
+                // 报错信息把合法值列出来 —— 这里的错误来自前端下拉，正常人不会见到
+                throw new BizException(ResultBean.code_warn,
+                        "只能重置为「待解读」或「已发布」，不支持：" + statusRaw);
+            }
+        }
+        String tid = bookId.trim();
+        boolean ok = interpretationRepository.resetStatus(tid, target);
+        if (!ok) {
+            throw BizException.notFound("清单里没有这本书：" + bookId);
+        }
+        log.info("AI 书籍解读：已把 {} 重置为{}", tid, target.getLabel());
         return true;
     }
 
@@ -840,7 +1076,7 @@ public class PublishServiceImpl implements PublishService {
      * 把正文写到本地 Markdown。
      *
      * <p>文件名 = 日期 + 书名（用户 2026-10-08 定），形如 {@code 2026-10-08_《活着》.md}。
-     * 书名里的 Windows 非法字符会被换成下划线 —— 微信读书的书名里有冒号、斜杠并不罕见，
+     * 书名里的 Windows 非法字符会被换成下划线 —— 阅读平台的书名里有冒号、斜杠并不罕见，
      * 不处理的话 {@code Files.write} 会直接抛 {@code InvalidPathException}。
      *
      * <p>⚠️ 同名文件会被<b>覆盖</b>：同一天对同一本书重新生成，本来就该是「重来一遍」。
@@ -972,6 +1208,36 @@ public class PublishServiceImpl implements PublishService {
         } catch (NumberFormatException e) {
             return null;
         }
+    }
+
+    /**
+     * 读「发布范围」：{@code pick_taxonomy_config} 里 enabled=true 的一级分类，
+     * 转成 {@code categories[].categoryId}（Integer）。
+     *
+     * <p>二级分类的 code 是 {@code subCategoryId}，与查询用的 {@code categoryId} 不是一回事，
+     * 传下去只会静默贡献 0 条 —— 显式跳过（同 {@code doInit} 口径）。
+     *
+     * @return 可发布的一级分类 id；范围为空时返回空列表（由调用方提示「本次不发布」）
+     */
+    private List<Integer> resolvePickCategoryIds() {
+        List<Integer> ids = new ArrayList<Integer>();
+        for (AiTaxonomyItem item : aiConfigRepository.listEnabledPickTaxonomy()) {
+            if (item == null) {
+                continue;
+            }
+            String code = item.getCode() == null ? "" : item.getCode().trim();
+            if (code.isEmpty()) {
+                continue;
+            }
+            if (item.getParentCode() != null && !item.getParentCode().trim().isEmpty()) {
+                continue;
+            }
+            Integer parsed = toInt(code);
+            if (parsed != null) {
+                ids.add(parsed);
+            }
+        }
+        return ids;
     }
 
     /**

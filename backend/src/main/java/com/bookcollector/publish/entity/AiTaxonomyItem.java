@@ -26,7 +26,7 @@ import java.util.Date;
  * <b>不筛 {@code type}</b> —— 表名已经表达了语义，少一个条件就少一个失败点。
  *
  * <h3>🔴 为什么 {@code code} 能直接当 {@code categoryId} 用</h3>
- * 一级分类的 {@code code}（如 {@code "300000"}）就是微信读书
+ * 一级分类的 {@code code}（如 {@code "300000"}）就是阅读平台
  * {@code bookInfo.categories[].categoryId}，所以挑书时直接
  * {@code Criteria.where("categories.categoryId").in(codes)} 即可，
  * <b>不需要「名字 → code」的映射</b>。

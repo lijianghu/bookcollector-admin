@@ -11,7 +11,13 @@ import {
   type TaskActionKey,
   type TaskActionState,
 } from '@/utils/taskStatus'
-import type { ApiRequest, CollectTask, TaskLog, TaskRun } from '@/types'
+import {
+  targetTypeLabel,
+  type ApiRequest,
+  type CollectTask,
+  type TaskLog,
+  type TaskRun,
+} from '@/types'
 
 /**
  * 任务详情抽屉。
@@ -424,7 +430,7 @@ function trigger(action: TaskActionState): void {
             {{ taskStatusLabel(task?.status) }}
           </el-tag>
           <span class="target">
-            {{ task?.targetType === 'RANKING' ? '榜单' : '分类' }} ·
+            {{ targetTypeLabel(task?.targetType) }} ·
             {{ task?.targetName ?? task?.targetId }}（{{ task?.targetId }}）
           </span>
         </span>
@@ -554,7 +560,7 @@ function trigger(action: TaskActionState): void {
               <span class="text-mono">{{ dash(task?.id) }}</span>
             </el-descriptions-item>
             <el-descriptions-item label="目标类型">
-              {{ task?.targetType === 'RANKING' ? '榜单' : '分类' }}
+              {{ targetTypeLabel(task?.targetType) }}
             </el-descriptions-item>
             <el-descriptions-item label="目标 ID">
               <span class="text-mono">{{ dash(task?.targetId) }}</span>

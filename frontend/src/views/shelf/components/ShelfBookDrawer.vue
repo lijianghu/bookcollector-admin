@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { READING_STATUS_LABEL, type ReadingStatus, type ShelfBook } from '@/types'
+import { getBook } from '@/api/book'
+import { READING_STATUS_LABEL, type Book, type ReadingStatus, type ShelfBook } from '@/types'
 import { fallbackCoverStyle } from '@/utils/shelfVisual'
 import { dash, formatNumber } from '@/utils/format'
 
@@ -8,7 +9,7 @@ import { dash, formatNumber } from '@/utils/format'
  * 书架的图书详情面板。
  *
  * <h3>为什么不复用 `components/DetailDrawer.vue`</h3>
- * 那个组件是**后台风**的：白底 `el-descriptions` + 60 个字段分 5 组。
+ * 那个组件是**后台风**的：白底 `el-descriptions` + 59 个字段分 5 组。
  * 放在深色书架里会像「点开一本书结果弹出一张后台表格」，而且它 46 个字段里
  * 大半是 `webBookControl` / `blockSaveImg` 这类书架读者不关心的。
  *
@@ -55,13 +56,42 @@ const STATUSES: ReadingStatus[] = ['WANT_TO_READ', 'READING', 'FINISHED']
 
 const coverFailed = ref(false)
 
+/**
+ * 打开抽屉时**实时**取一次全量图书数据。
+ *
+ * <h3>🔴 为什么必须实时取，而不是直接用列表项</h3>
+ * 列表项（`ShelfBook` / `ReadingListItem`）是**快照** —— 加入藏书阁 / 阅读清单那一刻
+ * 只存了 9 个展示字段（见 `shelf.repository.ShelfBookRepository.SNAPSHOT_FIELDS`），
+ * **没有 `newRatingTitle`**。所以「评价标题」这一项拿不到，只能现查一次。
+ *
+ * <p>顺带的好处：拿到的永远是最新的档位（评分档位会随评价人数变化）。
+ * 代价是每开一次抽屉多一个请求 —— 抽屉是低频操作，可接受。
+ *
+ * <p>取不到（书已删 / 网络失败）时留 `null`，模板里那一项就不显示，
+ * **不影响抽屉的其余内容**。
+ */
+const live = ref<Book | null>(null)
+
 // 换了一本书就重置失败标记 —— 否则上一本封面加载失败会让这一本也走生成式封面
 watch(
   () => props.book?.bookId,
-  () => {
+  async (bookId) => {
     coverFailed.value = false
+    live.value = null
+    if (!bookId) {
+      return
+    }
+    try {
+      live.value = await getBook(bookId)
+    } catch {
+      // 拦截器已提示；这里只保证抽屉照常可用
+      live.value = null
+    }
   },
 )
+
+/** 评价标题（档位文案：神作 / 好评如潮 / …）。快照里没有，来自上面那次实时查询 */
+const ratingTitle = computed(() => live.value?.newRatingTitle ?? null)
 
 const generatedStyle = computed(() => fallbackCoverStyle(props.book?.bookId))
 
@@ -111,7 +141,11 @@ function handleVisibleChange(value: boolean): void {
         <div class="hero-meta">
           <h2 class="title">{{ book.title || '未命名' }}</h2>
           <p class="author">{{ dash(book.author) }}</p>
-          <span v-if="book.category" class="category">{{ book.category }}</span>
+          <div class="tags">
+            <span v-if="book.category" class="category">{{ book.category }}</span>
+            <!-- 评价标题：来自打开抽屉时的实时查询，快照里没有（取不到就不显示） -->
+            <span v-if="ratingTitle" class="category rating-title">{{ ratingTitle }}</span>
+          </div>
 
           <div class="rating">
             <span class="rating-value">{{ ratingText }}</span>
@@ -279,6 +313,13 @@ function handleVisibleChange(value: boolean): void {
   color: rgba(233, 220, 201, 0.66);
 }
 
+/* 分类 / 评价标题两个小圆牌 */
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .category {
   display: inline-block;
   padding: 2px 9px;
@@ -286,6 +327,12 @@ function handleVisibleChange(value: boolean): void {
   border-radius: 10px;
   font-size: 11px;
   color: rgba(226, 194, 148, 0.92);
+}
+
+/* 评价标题换个色（偏朱），免得和「平台分类」两块金棕色牌子混在一起 */
+.rating-title {
+  border-color: rgba(214, 132, 108, 0.42);
+  color: rgba(236, 170, 146, 0.94);
 }
 
 .rating {

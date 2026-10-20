@@ -1,9 +1,17 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { pageBooklists } from '@/api/booklist'
 import { createTask, updateTask } from '@/api/task'
 import { listTaxonomy } from '@/api/taxonomy'
-import type { CollectTask, TargetType, TaxonomyItem } from '@/types'
+import {
+  booklistDisplayName,
+  targetTypeLabel,
+  type Booklist,
+  type CollectTask,
+  type TargetType,
+  type TaxonomyItem,
+} from '@/types'
 
 /**
  * 新建 / 编辑采集任务（一个弹窗两种模式）。
@@ -79,9 +87,67 @@ const rankings = ref<TaxonomyItem[]>([])
  */
 const allCategories = ref<TaxonomyItem[]>([])
 
-const dictOfCurrentType = computed(() =>
-  form.targetType === 'RANKING' ? rankings.value : categories.value,
-)
+// ---------------------------------------------------------------------------
+// 书单候选（目标类型 = 书单）
+// ---------------------------------------------------------------------------
+
+/**
+ * 书单候选。**不预加载全量** —— 书单表可能有几千张（光「历史」一个平台分类就 4264 张），
+ * 一次性塞进 `el-select` 会让弹窗卡住。改成 `filterable` + `remote` 按关键词现查。
+ *
+ * <p>用的是书单配置页那个分页接口 `GET /api/booklists`，不另开端点：
+ * 它已经支持「关键词同时匹配 名称 与 书单ID（包含匹配）」，正好就是这里要的搜索语义。
+ */
+const booklistOptions = ref<Booklist[]>([])
+const booklistLoading = ref(false)
+/** 单次最多列多少个候选。够选了，再多也没人往下翻 */
+const BOOKLIST_OPTION_LIMIT = 50
+
+async function searchBooklists(keyword: string): Promise<void> {
+  booklistLoading.value = true
+  try {
+    const data = await pageBooklists({
+      keyword: keyword?.trim() || undefined,
+      page: 1,
+      size: BOOKLIST_OPTION_LIMIT,
+    })
+    booklistOptions.value = data.list
+  } catch {
+    booklistOptions.value = []
+  } finally {
+    booklistLoading.value = false
+  }
+}
+
+/** 书单候选的展示文案。⚠️ 没名称的用 ID 当名称（用户 2026-10-14 定的口径） */
+function booklistOptionLabel(b: Booklist): string {
+  return `${booklistDisplayName(b)}（${b.booklistId}）`
+}
+
+/**
+ * 当前目标类型对应的候选来源（**字典类**：分类 / 榜单）。
+ *
+ * <h3>🔴 为什么写成 switch 而不是三元</h3>
+ * 原来是 `form.targetType === 'RANKING' ? rankings : categories`。
+ * 那种写法新增类型时**不会报错**：一个书单任务会静默拿到**分类字典**，
+ * 于是下拉框里列出一堆分类 code，用户选中之后建出一个「书单」任务，
+ * 目标 ID 却是个分类号 —— 跑起来永远采不到东西。
+ *
+ * <p>这里显式穷尽每种类型。⚠️ **书单不在这个字典里**：它的候选来自「书单」表
+ * （{@link booklistOptions}），形状也不是 `TaxonomyItem`，所以模板里单独一个分支渲染。
+ * 让它落到 `default` 返回空数组 —— 空下拉框是「看得见的缺失」，比拿错字典好；
+ * 真正的书单选择框由 `v-if="form.targetType === 'BOOKLIST'"` 那条分支负责。
+ */
+const dictOfCurrentType = computed<TaxonomyItem[]>(() => {
+  switch (form.targetType) {
+    case 'RANKING':
+      return rankings.value
+    case 'CATEGORY':
+      return categories.value
+    default:
+      return []
+  }
+})
 
 /** 已经被别的任务占用的目标 key，形如 `CATEGORY:300000` */
 const usedTargetKeys = computed<Set<string>>(() => {
@@ -143,6 +209,39 @@ const availableGroups = computed(() => {
 const hiddenCount = computed(
   () => dictOfCurrentType.value.length - availableTargets.value.length,
 )
+
+/**
+ * 书单候选（已剔除「已经有任务的目标」）。
+ *
+ * 与 {@link availableTargets} 同一个理由：`collect_tasks` 上有
+ * `(targetType, targetId)` 唯一索引，重复新建必定 405。让用户在一个必然失败的
+ * 选项上浪费时间是很差的设计，所以直接不列出来。
+ * （只对**已拉取到的这 50 条**生效 —— 更靠后的书单有没有建过任务，
+ *   前端无从知道，后端那道 405 仍然兜底。）
+ */
+const booklistCandidates = computed(() =>
+  booklistOptions.value.filter(
+    (b) => !usedTargetKeys.value.has(`${form.targetType}:${b.booklistId}`),
+  ),
+)
+
+/**
+ * 新建时要写进 `targetName` 的**名称快照**。
+ *
+ * 分类 / 榜单取字典里的名字，书单取书单名（没有名称时 `booklistDisplayName`
+ * 会回退成书单 ID —— 与用户 2026-10-14 的口径一致；就算这里给了 undefined，
+ * 后端 `TaskServiceImpl.create` 也会用 targetId 兜底）。
+ *
+ * <p>统一成一个 computed 而不是在提交处写 if：两条分支只能命中一个，
+ * 分开写迟早会出现「书单任务把分类名快照进去了」这种静默错配。
+ */
+const currentTargetName = computed<string | undefined>(() => {
+  if (form.targetType === 'BOOKLIST') {
+    const picked = booklistOptions.value.find((b) => b.booklistId === form.targetId)
+    return picked ? booklistDisplayName(picked) : undefined
+  }
+  return dictOfCurrentType.value.find((t) => t.code === form.targetId)?.name
+})
 
 /**
  * 「排除分类」的候选项 —— 用**完整字典**分组，不做任何剔除。
@@ -241,6 +340,11 @@ function fillFrom(task: CollectTask | null): void {
  */
 function handleTargetTypeChange(): void {
   form.targetId = ''
+  // 切到书单：先拉一批候选（不传关键词 = 收藏人数降序的前 50 张）。
+  // 不预加载全量的理由见 searchBooklists 的说明。
+  if (form.targetType === 'BOOKLIST') {
+    void searchBooklists('')
+  }
 }
 
 watch(
@@ -262,7 +366,7 @@ const targetText = computed(() => {
   if (!props.task) {
     return '-'
   }
-  const typeName = props.task.targetType === 'RANKING' ? '榜单' : '分类'
+  const typeName = targetTypeLabel(props.task.targetType)
   return `${typeName} · ${props.task.targetName ?? props.task.targetId}（${props.task.targetId}）`
 })
 
@@ -289,13 +393,13 @@ async function submit(): Promise<void> {
       ElMessage.success('任务已保存')
       emit('saved', updated)
     } else {
-      const target = dictOfCurrentType.value.find((t) => t.code === form.targetId)
       const created = await createTask({
         name: form.name,
         targetType: form.targetType,
         targetId: form.targetId,
-        // 目标名快照：任务建完之后，即使字典项被删/改名，任务里也还知道自己在采什么
-        targetName: target?.name,
+        // 目标名快照：任务建完之后，即使字典项被删/改名（书单则是后来才回填名称），
+        // 任务里也还知道自己在采什么。见 currentTargetName 的说明。
+        targetName: currentTargetName.value,
         maxPages: form.maxPages,
         excludeCategories: form.excludeCategories,
         remark: form.remark,
@@ -353,38 +457,79 @@ function handleClose(): void {
           <el-radio-group v-model="form.targetType" @change="handleTargetTypeChange">
             <el-radio-button value="CATEGORY">分类</el-radio-button>
             <el-radio-button value="RANKING">榜单</el-radio-button>
+            <el-radio-button value="BOOKLIST">书单</el-radio-button>
           </el-radio-group>
         </el-form-item>
 
-        <el-form-item label="采集目标" prop="targetId">
-          <el-select v-model="form.targetId" clearable filterable placeholder="选择要采集的分类或榜单">
-            <!-- 有二级分类时按层级分组；没有（如榜单）就平铺，与改造前完全一致 -->
-            <template v-if="hasSubCategories">
-              <el-option-group v-for="g in availableGroups" :key="g.label" :label="g.label">
+        <!-- 书单：候选来自「书单」表，按关键词现查（表里可能几千张，不能一次全列） -->
+        <template v-if="form.targetType === 'BOOKLIST'">
+          <el-form-item label="采集目标" prop="targetId">
+            <el-select
+              v-model="form.targetId"
+              clearable
+              filterable
+              remote
+              reserve-keyword
+              :remote-method="searchBooklists"
+              :loading="booklistLoading"
+              placeholder="输入书单名或书单 ID 搜索"
+            >
+              <el-option
+                v-for="b in booklistCandidates"
+                :key="b.booklistId"
+                :label="booklistOptionLabel(b)"
+                :value="b.booklistId"
+              />
+            </el-select>
+          </el-form-item>
+          <div class="field-hint">
+            书单来自「书单配置」页 —— 还没同步过的话，先去那里把平台分类下的书单发现进来。
+            没有名称的书单会显示成它的 ID，任务<b>启动时</b>会自动回填真实名称。
+            单张书单一次返回全部书籍（接口上限 500 本），所以「最大页数」对它不起作用。
+            <template v-if="booklistCandidates.length > 0">
+              <br />当前列出 {{ booklistCandidates.length }} 个（按收藏人数降序），
+              输入关键词可以搜更多。
+            </template>
+          </div>
+        </template>
+
+        <!-- 分类 / 榜单：候选来自字典 -->
+        <template v-else>
+          <el-form-item label="采集目标" prop="targetId">
+            <el-select
+              v-model="form.targetId"
+              clearable
+              filterable
+              placeholder="选择要采集的分类或榜单"
+            >
+              <!-- 有二级分类时按层级分组；没有（如榜单）就平铺，与改造前完全一致 -->
+              <template v-if="hasSubCategories">
+                <el-option-group v-for="g in availableGroups" :key="g.label" :label="g.label">
+                  <el-option
+                    v-for="opt in g.options"
+                    :key="opt.value"
+                    :label="opt.label"
+                    :value="opt.value"
+                  />
+                </el-option-group>
+              </template>
+              <template v-else>
                 <el-option
-                  v-for="opt in g.options"
+                  v-for="opt in availableTargets"
                   :key="opt.value"
                   :label="opt.label"
                   :value="opt.value"
                 />
-              </el-option-group>
+              </template>
+            </el-select>
+          </el-form-item>
+          <div class="field-hint">
+            可选 {{ availableTargets.length }} 个
+            <template v-if="hiddenCount > 0">
+              （另有 {{ hiddenCount }} 个已建过任务，不在此列出）
             </template>
-            <template v-else>
-              <el-option
-                v-for="opt in availableTargets"
-                :key="opt.value"
-                :label="opt.label"
-                :value="opt.value"
-              />
-            </template>
-          </el-select>
-        </el-form-item>
-        <div class="field-hint">
-          可选 {{ availableTargets.length }} 个
-          <template v-if="hiddenCount > 0">
-            （另有 {{ hiddenCount }} 个已建过任务，不在此列出）
-          </template>
-        </div>
+          </div>
+        </template>
       </template>
 
       <!-- 编辑：目标只读 -->

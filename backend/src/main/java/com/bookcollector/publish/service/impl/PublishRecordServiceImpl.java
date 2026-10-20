@@ -26,9 +26,4 @@ public class PublishRecordServiceImpl implements PublishRecordService {
     public PageResult<PublishRecord> page(Integer page, Integer size) {
         return repository.page(page, size);
     }
-
-    @Override
-    public long count() {
-        return repository.count();
-    }
 }

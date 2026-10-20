@@ -43,12 +43,10 @@ spring:
     banner-mode: off
 
 # ------------------------------------------------------------------
-# 微信读书接口
+# 平台接口
 # ------------------------------------------------------------------
 bookcollector:
   weread:
-    base-url: https://weread.qq.com/web/bookListInCategory
-    referer: https://weread.qq.com/
     connect-timeout: 10000
     read-timeout: 30000
     # 1 = 每页间隔 1 秒，沿用原 Python 的 time.sleep(1)
@@ -78,7 +76,7 @@ bookcollector:
   task:
     # 同时允许运行的采集任务数。
     # 默认 1：接口限速是全局的（1 秒/页），并发跑两个任务等于把请求频率翻倍，
-    # 有被微信读书限流的风险。对齐 2.5 非功能需求「同时最多 1 个采集任务在跑」。
+    # 有被阅读平台限流的风险。对齐 2.5 非功能需求「同时最多 1 个采集任务在跑」。
     max-concurrent-runs: 1
     # 采集线程池队列容量，满了直接拒绝（不阻塞 HTTP 线程）
     queue-capacity: 16

@@ -6,7 +6,7 @@ import { listTasks } from '@/api/task'
 import ProTable from '@/components/ProTable.vue'
 import TaxonomyFormDialog from './TaxonomyFormDialog.vue'
 import { dash, formatDateTime } from '@/utils/format'
-import type { CollectTask, TargetType, TaxonomyItem } from '@/types'
+import { targetTypeLabel, type CollectTask, type TaxonomyItem, type TaxonomyType } from '@/types'
 
 /**
  * 分类配置（S6.4）。
@@ -29,7 +29,9 @@ import type { CollectTask, TargetType, TaxonomyItem } from '@/types'
  * 任务量级是几十个，一次拉全量比 N 次查询便宜得多。
  */
 
-const activeType = ref<TargetType>('CATEGORY')
+// ⚠️ 类型是 TaxonomyType（只有分类 / 榜单），不是 TargetType —— 书单不进字典表。
+//    收窄之后，万一有人给这里塞 'BOOKLIST'，listTaxonomy 会直接编译不过。
+const activeType = ref<TaxonomyType>('CATEGORY')
 
 const categories = ref<TaxonomyItem[]>([])
 const rankings = ref<TaxonomyItem[]>([])
@@ -40,7 +42,7 @@ const rows = computed(() =>
   activeType.value === 'CATEGORY' ? categories.value : rankings.value,
 )
 
-const typeLabel = computed(() => (activeType.value === 'RANKING' ? '榜单' : '分类'))
+const typeLabel = computed(() => targetTypeLabel(activeType.value))
 
 /** 某个目标被几个任务引用 */
 function refCount(item: TaxonomyItem): number {

@@ -94,10 +94,27 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '发布记录' },
       },
       {
+        // 2026-10-20 新增：付费精选配置（按 taxonomy_config 一级分类分页采集）
+        path: 'paid',
+        name: 'paid',
+        component: () => import('@/views/paid/index.vue'),
+        meta: { title: '付费精选配置' },
+      },
+      {
         path: 'taxonomy',
         name: 'taxonomy',
         component: () => import('@/views/taxonomy/index.vue'),
         meta: { title: '分类配置' },
+      },
+      {
+        // 2026-10-14 新增。菜单里叫「书单配置」（在「配置」分组，见 menu.ts），
+        // 路由路径保持**扁平**的 `/booklists` —— 两级结构由 menu.ts 的父子关系表达，
+        // 路由不需要跟着嵌套（同 `books/featured` / `publish/*` 的做法）。
+        // ⚠️ 路径是 `/booklists`（复数），与 `/books`（图书库）只差一个 s，别看串。
+        path: 'booklists',
+        name: 'booklists',
+        component: () => import('@/views/booklist/index.vue'),
+        meta: { title: '书单配置' },
       },
       {
         path: 'cursors',
@@ -195,7 +212,7 @@ router.beforeEach(async (to) => {
 
 router.afterEach((to) => {
   const title = (to.meta?.title as string) || ''
-  document.title = title ? `${title} · 微信读书采集后台` : '微信读书采集后台'
+  document.title = title ? `${title} · 图书采集后台` : '图书采集后台'
 })
 
 export default router

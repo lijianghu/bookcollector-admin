@@ -80,7 +80,7 @@ public final class RefreshTarget {
             new RefreshTarget(TargetType.RANKING, "rising", "飙升榜"),
             new RefreshTarget(TargetType.RANKING, "hot_search", "热搜榜"),
             new RefreshTarget(TargetType.RANKING, "newbook", "新书榜"),
-            new RefreshTarget(TargetType.RANKING, "general_novel_rising", "小说飙升榜"),
+            new RefreshTarget(TargetType.RANKING, "general_novel_rising", "小说榜"),
             new RefreshTarget(TargetType.RANKING, "all", "总榜"),
             new RefreshTarget(TargetType.RANKING, "newrating_publish", "神作榜"),
             new RefreshTarget(TargetType.RANKING, "newrating_potential_publish", "潜力榜"),

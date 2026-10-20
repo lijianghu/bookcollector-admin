@@ -6,6 +6,7 @@ import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.io.Serializable;
 import java.util.Date;
+import java.util.List;
 
 /**
  * 发布记录（集合 {@code publish_record}）—— 每次成功发布到语雀留下一条。
@@ -83,6 +84,17 @@ public class PublishRecord implements Serializable {
 
     /** 命中的敏感词个数 */
     private Integer sensitiveHitCount;
+
+    /**
+     * 本次命中的敏感词<b>原词列表</b>（2026-10-13 加）。
+     *
+     * <p>页面上「合规替换」那一列点开要能看到「替换了哪些词」—— 光有个数不够用。
+     * 顺序就是替换时的扫描顺序；同一个词在一篇里出现多次会被记多次。
+     *
+     * <p>⚠️ 2026-10-13 之前的记录<b>没有这个字段</b>（那时只存了个数），
+     * 读出来是 {@code null} —— 前端按「历史记录未保存替换词」处理。
+     */
+    private List<String> sensitiveHits;
 
     /** 触发方式：{@code MANUAL}（手动）/ {@code SCHEDULED}（定时） */
     private String trigger;

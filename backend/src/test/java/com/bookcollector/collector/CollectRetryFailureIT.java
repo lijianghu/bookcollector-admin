@@ -50,7 +50,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 「任务真的变 FAILED」要等 S3 的 {@code TaskRunner} 才成立 —— 所以顺延到 S7 一次验完。
  *
  * <h3>怎么验（不 mock 采集逻辑，只换对端）</h3>
- * 用 JDK 自带的 {@link HttpServer} 起一个「假微信读书」，通过
+ * 用 JDK 自带的 {@link HttpServer} 起一个「假阅读平台」，通过
  * {@link DynamicPropertySource} 把 {@code bookcollector.weread.base-url} 指过去。
  * 好处是<b>能精确数出服务端收到了几次请求</b> —— 这是断言「重试了 3 次」唯一诚实的办法。
  * 换成 mock 掉 {@code WereadClient} 就变成「测自己写的 mock」了，没有意义。
@@ -119,7 +119,7 @@ class CollectRetryFailureIT {
     private String taskId;
 
     // ==================================================================
-    // 把微信读书的 base-url 指到假服务上
+    // 把阅读平台的 base-url 指到假服务上
     // ==================================================================
 
     @DynamicPropertySource
@@ -144,7 +144,7 @@ class CollectRetryFailureIT {
         server.setExecutor(Executors.newFixedThreadPool(2));
         server.start();
         fakeServer = server;
-        System.out.println("[S7-IT] 假微信读书服务已启动：http://127.0.0.1:" + FAKE_PORT
+        System.out.println("[S7-IT] 假阅读平台服务已启动：http://127.0.0.1:" + FAKE_PORT
                 + "/web/bookListInCategory（base-url 已指向它，真实接口不会被访问）");
     }
 

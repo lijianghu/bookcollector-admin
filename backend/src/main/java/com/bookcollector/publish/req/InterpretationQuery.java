@@ -5,6 +5,9 @@ import com.bookcollector.util.RegexUtil;
 
 import lombok.Data;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
@@ -40,6 +43,38 @@ public class InterpretationQuery {
     public static final int DEFAULT_SIZE = 20;
 
     /**
+     * 默认排序字段（用户 2026-10-13 指定：**默认推荐值倒序**）。
+     *
+     * <p>⚠️ 它同时也是「前端传了不认识的 sortField」时的回落值 ——
+     * 排序字段来自前端，为它报 400 会让「用户点错一下表头」变成一次报错。
+     */
+    public static final String DEFAULT_SORT_FIELD = "newRating";
+
+    /**
+     * 排序字段白名单：前端传的 key → Mongo 字段路径。
+     *
+     * <h3>🔴 为什么必须是白名单</h3>
+     * {@code sortField} 会被直接拼进 {@code Sort.by(...)}，等于把字段名交给前端。
+     * 不做白名单的话，前端传什么就按什么排（最坏情况是排一个不存在的字段 →
+     * 退化成自然序且不报错，最难查）。所以这里只认这 6 个，其余一律回落默认。
+     *
+     * <p>⚠️ 三个「数」在库里是**嵌套路径** {@code newRatingDetail.*}（不是顶层字段）。
+     * 路径写错会静默按不存在的字段排 —— 同 {@code streamCandidates} 注释里那个坑。
+     */
+    private static final Map<String, String> SORT_PATHS = buildSortPaths();
+
+    private static Map<String, String> buildSortPaths() {
+        Map<String, String> m = new LinkedHashMap<String, String>();
+        m.put("newRating", "newRating");
+        m.put("newRatingCount", "newRatingCount");
+        m.put("readingCount", "readingCount");
+        m.put("goodCount", "newRatingDetail.good");
+        m.put("fairCount", "newRatingDetail.fair");
+        m.put("poorCount", "newRatingDetail.poor");
+        return Collections.unmodifiableMap(m);
+    }
+
+    /**
      * 解读状态：{@code PENDING} / {@code GENERATING} / {@code PUBLISHED} / {@code FAILED}。
      * 空白 = 全部。
      */
@@ -59,10 +94,21 @@ public class InterpretationQuery {
     /**
      * 按平台分类 ID 精确筛（匹配快照里的 {@code categories.categoryId}）。
      *
-     * <p>⚠️ 只传<b>一级分类</b>的 code —— 二级分类的 code 是 {@code subCategoryId}，
-     * 是另一个字段，传进来恒不匹配且<b>静默返回 0 条</b>。这条坑与图书库同源。
+     * <p>⚠️ 只传<b>一级分类</b>的 code。二级分类走 {@link #subCategoryId} ——
+     * 两者<b>不会同时有值</b>：前端的级联框「选一级发这个、选到二级发那个」。
      */
     private Integer categoryId;
+
+    /**
+     * 按<b>二级分类</b> ID 精确筛（匹配快照里的 {@code categories.subCategoryId}）。
+     *
+     * <p>2026-10-13 加：需求要求「平台分类支持二级，同图书库的筛选」。
+     * 与 {@link #categoryId} 互斥 —— 级联框选到叶子时只发这一个。
+     *
+     * <p>⚠️ 库里 {@code categories[].subCategoryId} 是 <b>int</b>；拿字符串去匹配
+     * <b>恒不命中且不报错</b>（同图书库踩过的类型敏感坑）。
+     */
+    private Integer subCategoryId;
 
     /** 推荐值下限（含）。路径是顶层 {@code newRating}（0~1000） */
     private Integer minRating;
@@ -78,6 +124,18 @@ public class InterpretationQuery {
 
     /** 出版时间上限，形如 {@code "2023-12"}。传 {@code "2023"} 时语义是「2023 年全年」 */
     private String maxPublishTime;
+
+    /**
+     * 排序字段（2026-10-13 加）。取值是 {@link #SORT_PATHS} 的 key：
+     * {@code newRating} / {@code newRatingCount} / {@code readingCount} /
+     * {@code goodCount} / {@code fairCount} / {@code poorCount}。
+     *
+     * <p>空白 / 不认识的值 → 回落 {@link #DEFAULT_SORT_FIELD}（推荐值）。
+     */
+    private String sortField;
+
+    /** 排序方向（2026-10-13 加）：{@code true} = 升序；{@code false} / 缺省 = 降序 */
+    private Boolean asc;
 
     /** 页码，从 1 开始 */
     private int page = 1;
@@ -126,6 +184,25 @@ public class InterpretationQuery {
     /** 出版时间上限，粗粒度输入补齐成可比较形式（同图书库的口径） */
     public String resolveMaxPublishTime() {
         return PublishTimeUtil.padUpperBound(maxPublishTime);
+    }
+
+    /**
+     * 排序字段 → Mongo 字段路径。<b>永远返回一个可用路径</b>（不认识就回落默认）。
+     *
+     * <p>所以调用方（{@code InterpretationRepository.page}）不用判空、不用兜底。
+     */
+    public String resolveSortPath() {
+        String key = blankToNull(sortField);
+        if (key == null) {
+            return DEFAULT_SORT_FIELD;
+        }
+        String path = SORT_PATHS.get(key);
+        return path == null ? DEFAULT_SORT_FIELD : path;
+    }
+
+    /** 排序方向：{@code true} = 升序，其余（含 {@code null}）= 降序 */
+    public boolean resolveAsc() {
+        return Boolean.TRUE.equals(asc);
     }
 
     // ------------------------------------------------------------------

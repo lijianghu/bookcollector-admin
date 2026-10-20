@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { pagePublishRecords } from '@/api/publish'
 import ProTable from '@/components/ProTable.vue'
 import { dash, formatDateTime, formatNumber } from '@/utils/format'
@@ -34,6 +34,34 @@ const rows = ref<PublishRecord[]>([])
 const total = ref(0)
 const page = ref(1)
 const size = ref(20)
+
+/**
+ * 「合规替换」明细弹窗（2026-10-13 加）。
+ *
+ * <h3>为什么要加</h3>
+ * 那一列原来只显示「N 词」，看不到**替换了什么** —— 想知道就得去语雀 / 本地 md 里翻，
+ * 或者直连 Mongo 看 `book_interpretations.sensitiveHits`。
+ *
+ * <p>数据来自 `PublishRecord.sensitiveHits`（命中的**原词**列表）。
+ * ⚠️ 2026-10-13 **之前**的记录没有这个字段（那时只存了个数）→ `null`，
+ * 弹窗里如实说明「只存了个数」，不是坏了。
+ */
+const hitsVisible = ref(false)
+const hitsRow = ref<PublishRecord | null>(null)
+
+function openHits(row: PublishRecord): void {
+  hitsRow.value = row
+  hitsVisible.value = true
+}
+
+/** 弹窗里的词；历史记录（没有该字段）给空数组 */
+const hitsWords = computed<string[]>(() => hitsRow.value?.sensitiveHits ?? [])
+
+/** 弹窗标题：合规替换 ·《书名》 */
+const hitsTitle = computed<string>(() => {
+  const name = hitsRow.value?.title ?? hitsRow.value?.bookId
+  return name ? `合规替换 ·《${name}》` : '合规替换'
+})
 
 async function load(): Promise<void> {
   loading.value = true
@@ -108,7 +136,7 @@ onMounted(() => {
     <el-alert type="info" :closable="false" class="intro">
       <template #title>
         每次成功发布到语雀留下一条记录，按发布时间倒序。书名 / 作者 / 分类是<b>发布那一刻</b>的快照，
-        之后改图书库不会改写这里。新增记录由「发布配置」的「生成并发布」自动写入。
+        之后改图书库不会改写这里。新增记录由「发布配置」的「生成并发布」或「定时发布」写入。
       </template>
     </el-alert>
 
@@ -189,7 +217,15 @@ onMounted(() => {
 
         <el-table-column label="合规替换" width="84" align="center">
           <template #default="{ row }">
-            <span v-if="row.sensitiveHitCount" class="num">{{ row.sensitiveHitCount }} 词</span>
+            <!-- 点开看**替换了哪些词**（2026-10-13）；没有命中的行不可点 -->
+            <el-link
+              v-if="row.sensitiveHitCount"
+              type="primary"
+              :underline="false"
+              @click="openHits(row)"
+            >
+              {{ row.sensitiveHitCount }} 词
+            </el-link>
             <span v-else>-</span>
           </template>
         </el-table-column>
@@ -203,6 +239,35 @@ onMounted(() => {
         </el-table-column>
       </ProTable>
     </el-card>
+
+    <!--
+      合规替换明细：点那一列弹出。数据是本次命中的敏感词**原词**列表
+      （顺序 = 替换时的扫描顺序；同一个词出现多次会列多次）。
+      ⚠️ 2026-10-13 之前的记录没有列表、只有个数 —— 走下面的空态说明。
+    -->
+    <el-dialog v-model="hitsVisible" :title="hitsTitle" width="520px">
+      <template v-if="hitsWords.length">
+        <div class="hits-hint">共 {{ hitsWords.length }} 处命中，按替换时的扫描顺序：</div>
+        <div class="hits-list">
+          <el-tag
+            v-for="(w, i) in hitsWords"
+            :key="`${w}-${i}`"
+            size="small"
+            type="warning"
+            effect="plain"
+          >
+            {{ w }}
+          </el-tag>
+        </div>
+      </template>
+      <el-empty
+        v-else
+        :image-size="72"
+        :description="hitsRow?.sensitiveHitCount
+          ? '这条记录只存了替换词个数，没存具体词（2026-10-13 起才记录）'
+          : '没有命中敏感词'"
+      />
+    </el-dialog>
   </div>
 </template>
 
@@ -249,5 +314,20 @@ onMounted(() => {
 
 .num {
   font-variant-numeric: tabular-nums;
+}
+
+/* 「合规替换」弹窗 */
+.hits-hint {
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.hits-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
 }
 </style>

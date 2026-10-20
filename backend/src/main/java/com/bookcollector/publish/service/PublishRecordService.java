@@ -16,7 +16,4 @@ public interface PublishRecordService {
 
     /** 分页，按发布时间倒序（最新在前） */
     PageResult<PublishRecord> page(Integer page, Integer size);
-
-    /** 记录总数 */
-    long count();
 }

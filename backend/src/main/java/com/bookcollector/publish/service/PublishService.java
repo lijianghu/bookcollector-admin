@@ -1,7 +1,9 @@
 package com.bookcollector.publish.service;
 
 import com.bookcollector.common.PageResult;
+import com.bookcollector.publish.req.CandidateBuildRequest;
 import com.bookcollector.publish.req.InterpretationQuery;
+import com.bookcollector.publish.vo.CandidateBookVO;
 import com.bookcollector.publish.vo.InterpretationVO;
 import com.bookcollector.publish.vo.PublishJobVO;
 
@@ -58,6 +60,48 @@ public interface PublishService {
     PublishJobVO updateConfig(String cron, Boolean enabled);
 
     // ==================================================================
+    // 精选配置（2026-10-12 新增）
+    // ==================================================================
+
+    /**
+     * 精选预览：按条件从图书库（{@code books}）查一页，<b>不写任何东西</b>。
+     *
+     * <p>它的定位是「精选之前先看一眼」—— 用户在前端调好筛选条件，
+     * 先看命中哪些书、有多少本，再决定批量精选还是全部精选。
+     * 因为全程只读，所以可以随便点、随便翻页。
+     *
+     * <p>条件与 {@link #collectCandidates(CandidateBuildRequest)} <b>完全共用</b>，
+     * 保证「预览到什么，精选的就是什么」。
+     *
+     * @throws com.bookcollector.common.BizException 条件不完整时（见
+     *         {@link #collectCandidates(CandidateBuildRequest)} 的校验口径）
+     */
+    PageResult<CandidateBookVO> previewCandidates(CandidateBuildRequest req, Integer page, Integer size);
+
+    /**
+     * 精选：把符合条件的书<b>快照进候选清单</b>（{@code book_interpretations}，
+     * {@code status = PENDING}）。已有的 bookId 一律跳过，所以可以反复执行。
+     *
+     * <h3>两种模式</h3>
+     * <ul>
+     *   <li><b>批量精选</b>（{@code all = false}）：只处理 {@code bookIds} 里那几个
+     *       —— 就是预览列表里勾选的当页行；</li>
+     *   <li><b>全部精选</b>（{@code all = true}）：忽略 {@code bookIds}，
+     *       按筛选条件把<b>命中全部</b>写进去。</li>
+     * </ul>
+     *
+     * <h3>🔴 异步执行，立刻返回</h3>
+     * 「全部精选」可能命中几千本，写入要几十秒 —— 同
+     * {@link #initializeCandidates()}，这里只把任务丢进线程池，
+     * 进度看 {@link #getJob()} 的 {@code initRunning / initScanned / initInserted}。
+     *
+     * <p>与 {@link #initializeCandidates()} <b>共用同一个互斥位与线程池</b>：
+     * 两者都在写候选清单，同时跑会互相踩（而且进度字段是同一组，
+     * 分开计数会让页面上的数字跳来跳去）。已有任务在跑时抛业务异常。
+     */
+    PublishJobVO collectCandidates(CandidateBuildRequest req);
+
+    // ==================================================================
     // 执行
     // ==================================================================
 
@@ -95,4 +139,20 @@ public interface PublishService {
      * @return 是否改到了记录（{@code false} = 这个 bookId 不在清单里）
      */
     boolean resetToPending(String bookId);
+
+    /**
+     * 「重置为」——把某一条的状态改成指定值（2026-10-16 新增，配套精选图书
+     * 列表的「重置为」下拉：待解读 / 已发布）。
+     *
+     * <p>与 {@link #resetToPending(String)} 的分工：那个是「无条件回待解读」的
+     * 老路径（语义不变）；本方法是新的通用入口，Controller 直接调它。
+     *
+     * @param bookId   图书 ID
+     * @param statusRaw 目标状态名；{@code null}/空 = {@code PENDING}（老调用零感知）。
+     *                  只接受 {@code PENDING} / {@code PUBLISHED} —— 白名单理由见
+     *                  {@code InterpretationRepository#resetStatus}（GENERATING
+     *                  必须由挑书流程设置；FAILED 必须带 errorMsg）。
+     * @return 是否改到了记录（{@code false} = 这个 bookId 不在清单里）
+     */
+    boolean resetTo(String bookId, String statusRaw);
 }

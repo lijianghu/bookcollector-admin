@@ -29,7 +29,7 @@ import java.util.List;
  *
  * <h3>顺带解决「集合不存在」的问题</h3>
  * 在一个不存在的集合上建索引，MongoDB 会<b>先把集合建出来</b>。
- * 所以这个初始化器跑完，它负责的 12 个集合就一定都存在了 —— 不需要单独写建集合的逻辑。
+ * 所以这个初始化器跑完，它负责的 14 个集合就一定都存在了 —— 不需要单独写建集合的逻辑。
  * （`sys_user` 就是靠这一条建出来的：它没有别的建表入口。）
  *
  * <p>⚠️ 但<b>不是所有集合都走这里</b>：`refresh_jobs` / `ai_publish_job` 以及 4 张
@@ -75,6 +75,7 @@ public class MongoIndexInitializer implements ApplicationRunner {
         created += initPublishRecord();
         created += initShelfBooks();
         created += initReadingList();
+        created += initBooklists();
 
         log.info("========== 索引初始化完成：{} 个索引，耗时 {} ms ==========",
                 created, System.currentTimeMillis() - start);
@@ -83,7 +84,10 @@ public class MongoIndexInitializer implements ApplicationRunner {
     /**
      * books —— 图书主表。
      *
-     * <p>4 个索引，全部是查询/正确性刚需，没有为了「以后可能用」而提前建的。
+     * <p>7 个索引，基本都是查询/正确性刚需。唯一一个「为即将到来的查询提前建」的是
+     * {@code idx_bookLists} —— 用户 2026-10-14 明确要求加上（P5 刚落地
+     * {@code books.bookLists}，「按书单筛书 / 统计某书单采到多少本」是这条链路的
+     * 自然下一步）。其余 6 个都是当前就有人用的。
      */
     private int initBooks() {
         IndexOperations ops = mongoTemplate.indexOps("books");
@@ -128,7 +132,40 @@ public class MongoIndexInitializer implements ApplicationRunner {
                 .on("firstCollectedAt", Sort.Direction.ASC)
                 .named("idx_firstCollectedAt"));
 
-        return 5;
+        // 「精选预览 / 全部精选」的排序：newRating↓ → newRatingCount↓ → _id↑
+        // （`InterpretationRepository.CANDIDATE_SORT`，但**作用在 books 上**，
+        //   所以索引要建在 books 而不是 book_interpretations）。
+        //
+        // 🔴 2026-10-13 加：在此之前这三个字段**没有任何复合索引**，实测 explain
+        // `docsExamined = 51577`（全表扫描 + 内存排序），「精选预览」一次 ~500ms。
+        // ⚠️ 与 idx_newRating **不是重复索引**：那个只服务「按推荐值筛/排」；
+        // 这个必须带上 newRatingCount 与 _id 才能覆盖完整排序 —— 分页要的是**全序**，
+        // 只按 newRating 排会让同分的书在翻页时重复/漏。
+        // ⚠️ 方向必须与 CANDIDATE_SORT 完全一致（DESC/DESC/ASC）：
+        // 复合索引只有在「完全匹配」或「完全反向」时才能免掉内存排序。
+        ops.ensureIndex(new Index()
+                .on("newRating", Sort.Direction.DESC)
+                .on("newRatingCount", Sort.Direction.DESC)
+                .on("_id", Sort.Direction.ASC)
+                .named("idx_newRating_ratingCount_id"));
+
+        // 按书单筛书（「这张书单里有哪些书」「某张书单采到多少本」）。
+        //
+        // 🔴 2026-10-14 加：`books.bookLists` 是 P5 新增的字段 —— 一个数组，
+        //    元素形如 `{bookListId, bookListName}`，写入走 `$addToSet` 跨次累加
+        //    （一本书属于多个书单时会有多个元素）。
+        // ⚠️ 路径写成 `bookLists.bookListId`（数组里的字段）：MongoDB 会自动建
+        //    **多键索引**（multikey），不需要任何额外声明 ——
+        //    `{"bookLists.bookListId": "xxx"}` 这种查询会命中它。
+        // ⚠️ 与 `idx_categories` **不是重复索引**：那个按平台分类（categoryId 是 int），
+        //    这个按书单 ID（字符串），数据源和查询场景都不同。
+        // ⚠️ 它也是本类唯一一个「当前没有调用方、为下一步铺路」的索引 ——
+        //    所以上面类注释里单独点了名，别以为是漏删的。
+        ops.ensureIndex(new Index()
+                .on("bookLists.bookListId", Sort.Direction.ASC)
+                .named("idx_bookLists"));
+
+        return 7;
     }
 
     /**
@@ -458,5 +495,57 @@ public class MongoIndexInitializer implements ApplicationRunner {
                 .named("idx_status_updated"));
 
         return 2;
+    }
+
+    /**
+     * booklists —— 书单表（2026-10-14 新增）。
+     *
+     * <p>只建 4 个索引。
+     *
+     * <h3>★ {@code uk_booklistId} 是正确性依赖，不是性能优化</h3>
+     * 同一张书单会被<b>多个平台分类</b>的采集扫到（接口按分类分页返回），
+     * 写入走的是「按 {@code booklistId} upsert」。没有这个唯一索引，
+     * 并发或重试场景下同一张书单会被插成多行 —— 而表现只是「书单列表里多了几条重复」，
+     * 极难归因（同 {@code books.uk_bookId}，R22）。
+     *
+     * <p>⚠️ 它是<b>新建集合</b>上的唯一索引，没有「库里已有重复值把应用拦在启动之外」
+     * 的风险（{@code publish_record} 当初刻意不建唯一索引正是为了避开这个，
+     * 因为那张表的历史数据是脚本补录的）。
+     *
+     * <h3>另外 3 个索引各服务一个已知查询</h3>
+     * <ul>
+     *   <li>{@code idx_platformCategories} —— 书单列表页按<b>平台分类</b>筛
+     *       （{@code platformCategories.categoryId} 是数组字段，MongoDB 会自动为数组
+     *       建多键索引，等值查询能用上）。</li>
+     *   <li>{@code idx_collectCount} —— 书单列表页按<b>收藏人数</b>排序；
+     *       这也是链路 A 的阈值字段（{@code >= 10000}）。</li>
+     *   <li>{@code idx_collectStatus} —— 书单列表页按<b>采书状态</b>筛
+     *       （待采 / 已采 / 失败）。</li>
+     * </ul>
+     *
+     * <p>它同时是 {@code booklists} 集合的<b>唯一建表入口</b> ——
+     * 见类注释「顺带解决集合不存在的问题」。
+     */
+    private int initBooklists() {
+        IndexOperations ops = mongoTemplate.indexOps("booklists");
+
+        ops.ensureIndex(new Index()
+                .on("booklistId", Sort.Direction.ASC)
+                .unique()
+                .named("uk_booklistId"));
+
+        ops.ensureIndex(new Index()
+                .on("platformCategories.categoryId", Sort.Direction.ASC)
+                .named("idx_platformCategories"));
+
+        ops.ensureIndex(new Index()
+                .on("collectCount", Sort.Direction.DESC)
+                .named("idx_collectCount"));
+
+        ops.ensureIndex(new Index()
+                .on("collectStatus", Sort.Direction.ASC)
+                .named("idx_collectStatus"));
+
+        return 4;
     }
 }
