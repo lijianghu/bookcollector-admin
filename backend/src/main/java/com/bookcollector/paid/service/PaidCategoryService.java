@@ -29,7 +29,9 @@ import org.springframework.stereotype.Service;
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -95,6 +97,8 @@ public class PaidCategoryService {
         executor.setAwaitTerminationSeconds(20);
         executor.initialize();
         live.set(idle(null));
+        // 上次进程遗留的 RUNNING → INTERRUPTED（旧版只写 maxIdx 的也一并处理）
+        stateRepository.markInterruptedOnStartup();
     }
 
     @PreDestroy
@@ -102,8 +106,14 @@ public class PaidCategoryService {
         executor.shutdown();
     }
 
-    /** 可采集的分类：{@code taxonomy_config} 里一级 + enabled=true */
+    /** 可采集的分类：{@code taxonomy_config} 里一级 + enabled=true；附带断点/状态 */
     public List<PaidCategoryVO> list() {
+        Map<String, PaidCollectState> states = new HashMap<String, PaidCollectState>();
+        for (PaidCollectState s : stateRepository.listAll()) {
+            if (s != null && s.getFilterCategory() != null) {
+                states.put(s.getFilterCategory(), s);
+            }
+        }
         List<TaxonomyItem> items = taxonomyRepository.findByType(TargetType.CATEGORY, true);
         List<PaidCategoryVO> result = new ArrayList<PaidCategoryVO>();
         for (TaxonomyItem item : items) {
@@ -118,7 +128,15 @@ public class PaidCategoryService {
             if (code == null || code.trim().isEmpty()) {
                 continue;
             }
-            result.add(PaidCategoryVO.builder().code(code.trim()).name(item.getName()).build());
+            PaidCollectState s = states.get(code.trim());
+            result.add(PaidCategoryVO.builder()
+                    .code(code.trim())
+                    .name(item.getName())
+                    .lastStatus(s == null ? null : s.getLastStatus())
+                    .page(s == null ? 0 : s.getPage())
+                    .totalCount(s == null ? null : s.getTotalCount())
+                    .updatedAt(s == null ? null : s.getUpdatedAt())
+                    .build());
         }
         return result;
     }
@@ -158,6 +176,10 @@ public class PaidCategoryService {
         PaidCollectState state = stateRepository.find(code);
         final int startMaxIdx = state == null ? 0 : Math.max(0, state.getMaxIdx());
         final int startPage = state == null ? 0 : Math.max(0, state.getPage());
+
+        // 先落一行「运行中 + 分类名称」：即使第一页就失败，列表里也能看到这条记录
+        stateRepository.save(code, name, startMaxIdx, startPage,
+                state == null ? null : state.getTotalCount(), "RUNNING");
 
         final Progress p = new Progress(code, name);
         p.running = true;
@@ -200,11 +222,20 @@ public class PaidCategoryService {
     /** 请求暂停：当前页跑完后原地等待，{@code maxIdx} 保留 */
     public void pause() {
         paused.set(true);
+        updateStatusQuietly("PAUSED");
     }
 
     /** 继续采集 */
     public void resume() {
         paused.set(false);
+        updateStatusQuietly("RUNNING");
+    }
+
+    private void updateStatusQuietly(String status) {
+        PaidCollectVO vo = live.get();
+        if (vo != null && vo.getFilterCategory() != null) {
+            stateRepository.updateStatus(vo.getFilterCategory(), status);
+        }
     }
 
     private void doCollect(Progress p, String filterCategory, int startMaxIdx) {
@@ -228,6 +259,7 @@ public class PaidCategoryService {
                     p.paused = false;
                 }
                 if (cancel.get()) {
+                    stateRepository.updateStatus(filterCategory, "STOPPED");
                     p.message = "已停止";
                     break;
                 }
@@ -235,6 +267,7 @@ public class PaidCategoryService {
                     rateLimiter.acquire();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    stateRepository.updateStatus(filterCategory, "INTERRUPTED");
                     p.message = "已中断";
                     break;
                 }
@@ -243,6 +276,7 @@ public class PaidCategoryService {
                 // 401 = 身份过期：进入暂停态，等用户更新凭证后点「继续」重试同一页
                 if (resp.getStatusCode() == 401) {
                     paused.set(true);
+                    stateRepository.updateStatus(filterCategory, "PAUSED");
                     p.paused = true;
                     p.message = "身份已过期（HTTP 401），已暂停；请更新凭证后点「继续」";
                     publish(p);
@@ -256,12 +290,14 @@ public class PaidCategoryService {
                     }
                     p.paused = false;
                     if (cancel.get()) {
+                        stateRepository.updateStatus(filterCategory, "STOPPED");
                         p.message = "已停止";
                         break;
                     }
                     continue;                   // 重试同一页，maxIdx 不变
                 }
                 if (!resp.isSuccess()) {
+                    stateRepository.updateStatus(filterCategory, "FAILED");
                     p.errorMsg = "第 " + (p.page + 1) + " 页请求失败：" + resp.describeFailure();
                     p.message = "失败";
                     break;
@@ -271,17 +307,20 @@ public class PaidCategoryService {
                 try {
                     root = JSON.parseObject(resp.getBody());
                 } catch (RuntimeException e) {
+                    stateRepository.updateStatus(filterCategory, "FAILED");
                     p.errorMsg = "响应不是合法 JSON：" + e.getMessage();
                     p.message = "失败";
                     break;
                 }
                 if (root == null) {
+                    stateRepository.updateStatus(filterCategory, "FAILED");
                     p.errorMsg = "响应为空";
                     p.message = "失败";
                     break;
                 }
                 Integer errcode = root.getInteger("errcode");
                 if (errcode != null && errcode.intValue() != 0) {
+                    stateRepository.updateStatus(filterCategory, "FAILED");
                     p.errorMsg = "接口拒绝：errcode=" + errcode + " " + root.getString("errmsg");
                     p.message = "失败";
                     break;
@@ -289,7 +328,8 @@ public class PaidCategoryService {
 
                 JSONArray books = root.getJSONArray("books");
                 if (books == null || books.isEmpty()) {
-                    stateRepository.delete(filterCategory);   // 采完，清断点
+                    stateRepository.save(filterCategory, p.filterCategoryName, maxIdx, p.page,
+                            p.totalCount, "COMPLETED");
                     p.message = "已到末页";
                     break;
                 }
@@ -306,11 +346,13 @@ public class PaidCategoryService {
                 publish(p);
 
                 int nextMaxIdx = maxIdx + WereadClient.paidPageSize();
-                stateRepository.save(filterCategory, nextMaxIdx, p.page, p.totalCount);
+                stateRepository.save(filterCategory, p.filterCategoryName, nextMaxIdx, p.page,
+                        p.totalCount, "RUNNING");
 
                 Integer hasMore = root.getInteger("hasMore");
                 if (hasMore == null || hasMore.intValue() != 1) {
-                    stateRepository.delete(filterCategory);   // 采完，清断点
+                    stateRepository.save(filterCategory, p.filterCategoryName, nextMaxIdx, p.page,
+                            p.totalCount, "COMPLETED");
                     p.message = "已完成";
                     break;
                 }
@@ -318,6 +360,7 @@ public class PaidCategoryService {
             }
         } catch (RuntimeException e) {
             log.error("付费精选：执行出错", e);
+            stateRepository.updateStatus(filterCategory, "FAILED");
             p.errorMsg = e.getMessage();
             p.message = "出错";
         } finally {

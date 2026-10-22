@@ -31,6 +31,16 @@ public class PaidCollectState implements Serializable {
 
     private String filterCategory;
 
+    /** 分类名称（如「文学」） */
+    private String filterCategoryName;
+
+    /**
+     * 最近一次状态：RUNNING / PAUSED / INTERRUPTED / COMPLETED / STOPPED / FAILED。
+     *
+     * <p>重启时 RUNNING 会被启动迁移改成 INTERRUPTED。
+     */
+    private String lastStatus;
+
     /** 下一页的 maxIdx（断点） */
     private int maxIdx;
 

@@ -44,6 +44,52 @@ const percent = computed(() => {
   return Math.min(100, Math.round((p.booksSaved / p.totalCount) * 100))
 })
 
+type StatusTag = { label: string; type: 'success' | 'warning' | 'danger' | 'primary' | 'info' }
+
+/** 行状态：正在跑的行用内存进度（实时），其它行用持久化的 lastStatus */
+function statusOf(row: PaidCategoryVO): StatusTag | null {
+  const p = progress.value
+  if (p && p.filterCategory === row.code) {
+    if (p.errorMsg) {
+      return { label: '失败', type: 'danger' }
+    }
+    if (p.paused) {
+      return { label: '已暂停', type: 'warning' }
+    }
+    if (p.running) {
+      return { label: '采集中', type: 'primary' }
+    }
+    return { label: '已完成', type: 'success' }
+  }
+  switch (row.lastStatus) {
+    case 'RUNNING':
+      return { label: '采集中', type: 'primary' }
+    case 'PAUSED':
+      return { label: '已暂停', type: 'warning' }
+    case 'INTERRUPTED':
+      return { label: '已中断', type: 'warning' }
+    case 'COMPLETED':
+      return { label: '已完成', type: 'success' }
+    case 'STOPPED':
+      return { label: '已停止', type: 'info' }
+    case 'FAILED':
+      return { label: '失败', type: 'danger' }
+    default:
+      return null
+  }
+}
+
+const statusMap = computed(() => {
+  const map: Record<string, StatusTag> = {}
+  for (const row of rows.value) {
+    const s = statusOf(row)
+    if (s) {
+      map[row.code] = s
+    }
+  }
+  return map
+})
+
 function stopPoll(): void {
   if (pollTimer !== null) {
     window.clearTimeout(pollTimer)
@@ -71,6 +117,8 @@ async function loadProgress(): Promise<void> {
       } else {
         ElMessage.success('采集已结束')
       }
+      // 刷新持久化状态（完成/停止/失败要落到行上）
+      void loadList()
     }
     wasRunning.value = data.running
   } catch {
@@ -225,12 +273,12 @@ onUnmounted(stopPoll)
         <el-table-column label="状态" width="140">
           <template #default="{ row }">
             <el-tag
-              v-if="progress && progress.filterCategory === row.code"
-              :type="progress.errorMsg ? 'danger' : progress.paused ? 'warning' : progress.running ? 'primary' : 'success'"
+              v-if="statusMap[row.code]"
+              :type="statusMap[row.code]?.type"
               size="small"
               effect="plain"
             >
-              {{ progress.errorMsg ? '失败' : progress.paused ? '已暂停' : progress.running ? '采集中' : '已完成' }}
+              {{ statusMap[row.code]?.label }}
             </el-tag>
             <span v-else class="text-muted">-</span>
           </template>

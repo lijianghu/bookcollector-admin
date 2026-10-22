@@ -219,8 +219,13 @@ function onMetricClick(card: MetricCard): void {
  * 标签默认隐藏（30 个标签会互相压），靠 hover 时 `emphasis` 显示 +
  * 右侧可滚动图例来识别。
  */
+/** 只保留一级分类（后端已把二级归并到一级）；榜单 / 书单 / 付费精选不计入 */
+const categoryRows = computed(() =>
+  (charts.value?.categoryDistribution ?? []).filter((row) => row.type === 'CATEGORY'),
+)
+
 const categoryPieOption = computed<ChartOption>(() => {
-  const rows = charts.value?.categoryDistribution ?? []
+  const rows = categoryRows.value
   if (!rows.length) {
     return { series: [] }
   }
@@ -259,14 +264,14 @@ const categoryPieOption = computed<ChartOption>(() => {
 
 /** 饼图卡片的摘要行 */
 const categorySummary = computed(() => {
-  const rows = charts.value?.categoryDistribution ?? []
+  const rows = categoryRows.value
   if (!rows.length) {
     return '暂无数据'
   }
   const total = rows.reduce((sum, row) => sum + row.count, 0)
   const top = rows[0]
-  // ⚠️ 一个副作用：同一本书若既在分类又在榜单里会被计两次，所以扇区之和 > 图书总数
-  return `共 ${rows.length} 个采集目标贡献 ${total} 本次入库（同一本书可能既属分类又属榜单，会重复计数）· 最多的是「${top.name}」${top.count} 本`
+  // 同一本书可能属于多个分类，会重复计数
+  return `共 ${rows.length} 个一级分类贡献 ${total} 本次入库（同一本书可能属于多个分类，会重复计数）· 最多的是「${top.name}」${top.count} 本`
 })
 
 // ======================================================================

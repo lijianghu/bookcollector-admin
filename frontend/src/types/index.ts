@@ -1732,6 +1732,14 @@ export interface PaidCategoryVO {
   code: string
   /** 分类名 */
   name: string
+  /** 最近一次状态：RUNNING / PAUSED / INTERRUPTED / COMPLETED / STOPPED / FAILED；没跑过为 null */
+  lastStatus?: string | null
+  /** 已翻页数 */
+  page?: number
+  /** 接口声明的总书数 */
+  totalCount?: number | null
+  /** 断点最后更新时间 */
+  updatedAt?: string | null
 }
 
 /** 「付费精选」采集的进度快照 */
