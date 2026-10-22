@@ -153,55 +153,41 @@ public class StatsServiceImpl implements StatsService {
     }
 
     /**
-     * 分类分布（饼图）。
+     * 分类分布（环形饼图）：按<b>书的平台分类</b>（{@code books.categories.categoryId}）统计。
      *
-     * <h3>口径说明：按「采集目标」分，不按「平台分类」分</h3>
-     * 每本书的 {@code collectSource} 是 {@code ["category:300000", "ranking:rising"]}
-     * 这样的来源列表 —— 展开后按来源计数，就是「各采集目标分别贡献了多少本书」。
+     * <p><b>2026-10-22 修正</b>：之前取的是 {@code collectSource}（采集来源），
+     * 但绝大多数书是通过「付费精选 / 书单」采进来的，来源不是 {@code category:*}，
+     * 导致分类扇区严重偏小（文学只显示 542，而书里实际属于文学的近 3.7 万本）。
+     * 现在直接按书自带的 {@code categories.categoryId} 聚合。
      *
-     * <p>为什么不用平台给的 {@code category}（如「精品小说-社会小说」）：
-     * 那个字段的取值有几百个，饼图会碎成一片糊；而且它反映的是<b>阅读平台</b>的分类体系，
-     * 不是「我这个采集器采了什么」。本系统的核心叙事就是「我采了哪些目标、各多少本」，
-     * 所以按采集目标分才是这张图该回答的问题。
-     *
-     * <h3>二级分类的来源要并到它的一级上</h3>
-     * 二级分类（如 {@code category:200003}「历史-历史读物」）现在也是合法采集目标。
-     * 原样展示的话，同一个大类会被拆成十几个扇区；更糟的是 {@link #DISTRIBUTION_LIMIT}
-     * 只有 30，二级会<b>把一级挤出榜单</b>。所以这里按 {@code parentCode} 把二级的计数
-     * 累加到它的一级上 —— 图上看到的始终是「22 个大类 + 7 个榜单」。
-     * 二级各自的采集量去「任务配置」按任务看。
-     *
-     * <p>一个副作用是：同一本书如果既在分类里又在榜单里，会被<b>计两次</b>
-     * （各来源一次）。这是对的 —— 两个扇区的和会大于图书总数，因为维度是
-     * 「来源贡献量」而不是「图书不重复归属」。
+     * <p>口径：
+     * <ul>
+     *   <li>{@code categories.categoryId} 本身就是一级分类 code（如 300000）；</li>
+     *   <li>一本书可能属于多个分类，会被计多次 —— 扇区之和 &gt; 图书总数，这是
+     *       「分类归属」维度的正常结果；</li>
+     *   <li>没有 {@code categories} 的书（当前约 6800 本）不计入；</li>
+     *   <li>万一某个 {@code categoryId} 是二级 code，仍按 {@code parentCode} 归并到一级。</li>
+     * </ul>
      */
     private List<Map<String, Object>> categoryDistribution() {
-        // 🔴 $limit 不能留在管道里：它会在「二级归并到一级之前」截断。若前 30 名恰好被
-        // 二级分类占满，一个「只采了一级、没采它的二级」的大类，会因为它自己那条
-        // category:xxxxxx 排在第 30 名开外而被整个丢掉 —— 图上凭空少一个扇区。
-        // 归并之后的扇区数上限只有 21 + 7 ≈ 28，所以把截断挪到归并之后做，
-        // 实际上几乎不会触发，但不会丢数据。
         List<Document> pipeline = Arrays.asList(
-                new Document("$match", new Document("collectSource",
-                        new Document("$exists", true).append("$ne", new ArrayList<String>()))),
-                new Document("$unwind", "$collectSource"),
-                new Document("$group", new Document("_id", "$collectSource")
+                new Document("$unwind", "$categories"),
+                new Document("$group", new Document("_id", "$categories.categoryId")
                         .append("count", new Document("$sum", 1))),
                 new Document("$sort", new Document("count", -1))
         );
         List<Document> rows = aggregate(pipeline, "books");
 
-        // 把 "category:300000" 翻成「文学」。字典全量一次查出来做内存映射（现在 195 条），
-        // 比在管道里 $lookup 一次更省事，也更容易排查（映射不上的会落到 code 上）
         Map<String, String> nameByKey = taxonomyNameMap();
         Map<String, String> parentOf = categoryParentMap();
 
-        // 先按「归并后的 sourceKey」累加。管道已按 count 降序排过，用 LinkedHashMap
-        // 记首次出现顺序 ≈ 沿用原排序；但归并会让顺序错乱（两个二级来源可能夹在中间），
-        // 所以最后再显式排一次
         final Map<String, Long> countByKey = new LinkedHashMap<String, Long>();
         for (Document row : rows) {
-            String sourceKey = row.getString("_id");
+            Object idObj = row.get("_id");
+            if (idObj == null) {
+                continue;
+            }
+            String sourceKey = "category:" + String.valueOf(idObj);
             String[] parts = splitSourceKey(sourceKey);
             String merged = rollUpToTopCategory(sourceKey, parts, parentOf);
             Long prev = countByKey.get(merged);
@@ -224,11 +210,10 @@ public class StatsServiceImpl implements StatsService {
             item.put("type", parts[0]);
             item.put("targetId", parts[1]);
             // 字典里查不到就用 code 本身兜底 —— 不隐藏异常数据，让人能看见它
-            item.put("name", nameByKey.getOrDefault(parts[0] + "|" + parts[1], sourceKey));
+            item.put("name", nameByKey.getOrDefault("CATEGORY|" + parts[1], sourceKey));
             item.put("count", countByKey.get(sourceKey));
             result.add(item);
         }
-        // 归并之后再截断（见方法开头关于 $limit 的说明）
         if (result.size() > DISTRIBUTION_LIMIT) {
             return new ArrayList<Map<String, Object>>(result.subList(0, DISTRIBUTION_LIMIT));
         }

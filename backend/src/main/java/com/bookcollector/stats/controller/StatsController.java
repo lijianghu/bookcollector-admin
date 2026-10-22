@@ -45,7 +45,7 @@ public class StatsController {
     }
 
     @Operation(summary = "图表数据",
-            description = "categoryDistribution 分类分布（饼，按采集目标） / "
+            description = "categoryDistribution 分类分布（饼，按书的平台分类） / "
                     + "ratingDistribution 评分分布（柱，10 个桶） / "
                     + "publishYearTrend 出版年份趋势（折线） / "
                     + "recentCollected 近 7 天采集量（柱，已补齐无数据的日期）")

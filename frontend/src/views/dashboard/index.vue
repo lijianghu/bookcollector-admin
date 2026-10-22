@@ -271,7 +271,7 @@ const categorySummary = computed(() => {
   const total = rows.reduce((sum, row) => sum + row.count, 0)
   const top = rows[0]
   // 同一本书可能属于多个分类，会重复计数
-  return `共 ${rows.length} 个一级分类贡献 ${total} 本次入库（同一本书可能属于多个分类，会重复计数）· 最多的是「${top.name}」${top.count} 本`
+  return `共 ${rows.length} 个一级分类，合计 ${total} 次分类归属（同一本书可能属于多个分类，会重复计数）· 最多的是「${top.name}」${top.count} 本`
 })
 
 // ======================================================================
