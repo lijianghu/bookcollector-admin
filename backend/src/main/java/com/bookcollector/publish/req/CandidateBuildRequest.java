@@ -41,6 +41,9 @@ public class CandidateBuildRequest {
     @Schema(description = "平台分类（一级）code 列表，必填非空。匹配 books.categories[].categoryId")
     private List<Integer> categoryIds;
 
+    @Schema(description = "书单 ID。传了它 = 书单模式：忽略平台分类 / 评价标签 / 推荐值 / 书名作者")
+    private String booklistId;
+
     @Schema(description = "评价标签（books.newRatingTitle），如 [神作, 好评如潮]")
     private List<String> ratingTitles;
 
@@ -77,6 +80,11 @@ public class CandidateBuildRequest {
             }
         }
         return out;
+    }
+
+    /** 书单 ID，空白归一成 {@code null} */
+    public String resolveBooklistId() {
+        return blankToNull(booklistId);
     }
 
     /** 评价标签：去掉空白项、去重（保序）。空 → 空列表 */
@@ -150,20 +158,17 @@ public class CandidateBuildRequest {
     }
 
     /**
-     * 除「平台分类」之外，是否还给了至少一个筛选条件。
+     * 是否至少给出一个筛选条件（任一非空即可）。
      *
-     * <p>⚠️ <b>刻意不含</b> {@code categoryIds}，虽然它也是条件 ——
-     * 因为平台分类是<b>必选的基础项</b>（前端默认全选），把它算进来会让本方法恒为 true，
-     * 校验就失去意义了。
-     *
-     * <p>也<b>不含</b> {@code excludeCollected} ——「隐藏已精选」是个收窄项，
-     * 单独勾上它等于「图书库全库」，不构成一次有意义的查询。
+     * <p>不含 {@code excludeCollected} ——「隐藏已精选」是收窄项，单独勾上它等于全库。
      */
-    public boolean hasFilterBeyondCategory() {
-        return !resolveRatingTitles().isEmpty()
+    public boolean hasAnyFilter() {
+        return !resolveCategoryIds().isEmpty()
+                || !resolveRatingTitles().isEmpty()
                 || resolveMinRatingValue() != null
                 || resolveTitle() != null
-                || resolveAuthor() != null;
+                || resolveAuthor() != null
+                || resolveBooklistId() != null;
     }
 
     // ------------------------------------------------------------------
@@ -176,6 +181,14 @@ public class CandidateBuildRequest {
 
     public void setCategoryIds(List<Integer> categoryIds) {
         this.categoryIds = categoryIds;
+    }
+
+    public String getBooklistId() {
+        return booklistId;
+    }
+
+    public void setBooklistId(String booklistId) {
+        this.booklistId = booklistId;
     }
 
     public List<String> getRatingTitles() {

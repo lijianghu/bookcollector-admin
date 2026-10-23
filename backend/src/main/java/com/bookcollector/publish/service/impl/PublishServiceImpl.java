@@ -390,12 +390,9 @@ public class PublishServiceImpl implements PublishService {
         if (req == null) {
             throw new BizException(ResultBean.code_warn, "缺少筛选条件");
         }
-        if (req.resolveCategoryIds().isEmpty()) {
-            throw new BizException(ResultBean.code_warn, "请至少选择一个平台分类");
-        }
-        if (!req.hasFilterBeyondCategory()) {
+        if (!req.hasAnyFilter()) {
             throw new BizException(ResultBean.code_warn,
-                    "请至少给出一个筛选条件（评价标签 / 推荐值下限 / 书名 / 作者）");
+                    "请至少给出一个筛选条件（平台分类 / 评价标签 / 推荐值 / 书名 / 作者 / 书单）");
         }
     }
 

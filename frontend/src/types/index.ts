@@ -1286,6 +1286,8 @@ export interface CandidateBuildRequest {
    * 传进来恒不匹配、静默返回 0 条 —— 与图书库同源的坑。
    */
   categoryIds?: number[]
+  /** 书单 ID。传了它 = 书单模式：忽略平台分类 / 评价标签 / 推荐值 / 书名作者 */
+  booklistId?: string
   /** 评价标签（`books.newRatingTitle`），如 `['神作', '好评如潮']` */
   ratingTitles?: string[]
   /** 推荐值下限（**百分制 0~100**，含） */

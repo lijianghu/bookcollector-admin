@@ -283,6 +283,17 @@ onUnmounted(stopPoll)
             <span v-else class="text-muted">-</span>
           </template>
         </el-table-column>
+        <el-table-column label="断点" width="150" align="right">
+          <template #default="{ row }">
+            <template v-if="row.page">
+              <span class="num">{{ formatNumber(row.page) }} 页</span>
+              <span v-if="row.totalCount" class="text-muted">
+                / {{ formatNumber(row.totalCount) }}
+              </span>
+            </template>
+            <span v-else class="text-muted">-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="操作" width="140" align="center">
           <template #default="{ row }">
             <el-button
@@ -300,6 +311,7 @@ onUnmounted(stopPoll)
               type="info"
               text
               :disabled="running"
+              title="清掉断点，从第 1 页重新采集"
               @click="onStart(row, true)"
             >
               从头

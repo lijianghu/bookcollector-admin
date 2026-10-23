@@ -128,6 +128,9 @@ public class PaidCategoryService {
             if (code == null || code.trim().isEmpty()) {
                 continue;
             }
+            if(PAID_CATEGORY_ID.equals(code)) { // 付费精选，code取0代表全部
+                code = "0";
+            }
             PaidCollectState s = states.get(code.trim());
             result.add(PaidCategoryVO.builder()
                     .code(code.trim())
@@ -204,7 +207,7 @@ public class PaidCategoryService {
             live.set(idle("启动失败：" + e.getMessage()));
             throw new BizException(ResultBean.code_warn, "线程池繁忙，本次未能启动，请稍后重试");
         }
-        log.info("付费精选：已提交 filterCategory={}", code);
+        log.info("付费精选：已提交 filterCategory={}，maxIdx={}，page={}", code, startMaxIdx, startPage);
         return progress();
     }
 
@@ -346,8 +349,10 @@ public class PaidCategoryService {
                 publish(p);
 
                 int nextMaxIdx = maxIdx + WereadClient.paidPageSize();
+                // 暂停在页边界生效：本页若在暂停请求之后才写完，状态必须落 PAUSED，
+                // 否则会被这里的 RUNNING 覆盖，重启后看起来像「没暂停」。
                 stateRepository.save(filterCategory, p.filterCategoryName, nextMaxIdx, p.page,
-                        p.totalCount, "RUNNING");
+                        p.totalCount, paused.get() ? "PAUSED" : "RUNNING");
 
                 Integer hasMore = root.getInteger("hasMore");
                 if (hasMore == null || hasMore.intValue() != 1) {

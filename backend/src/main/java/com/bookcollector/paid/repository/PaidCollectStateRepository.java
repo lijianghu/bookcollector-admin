@@ -74,7 +74,7 @@ public class PaidCollectStateRepository {
      */
     public void markInterruptedOnStartup() {
         Query q = Query.query(new Criteria().orOperator(
-                Criteria.where("lastStatus").is("RUNNING"),
+                Criteria.where("lastStatus").in("RUNNING", "PAUSED"),
                 new Criteria().andOperator(
                         Criteria.where("lastStatus").is(null),
                         Criteria.where("maxIdx").gt(0))));

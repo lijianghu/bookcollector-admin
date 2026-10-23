@@ -1,197 +1,58 @@
-# book 模块知识
+# book 模块
 
-> 包路径：`com.bookcollector.book` · 最后更新：2026-10-08
+> `com.bookcollector.book` · 图书库的读写（不负责采集）。
 
-## 1. 这个模块是干什么的
+## 职责
 
-图书库的可视化读写：分页筛选、详情、编辑、单条/批量删除。
-数据本身由 `collector` 采集写入，本模块**不负责采集**，只负责「人怎么看和怎么改」。
+分页筛选、详情、编辑、单条 / 批量删除；「完善书籍信息」异步补齐。
 
-## 2. 类清单
+## 关键类
 
-| 类 | 角色 | 一句话职责 |
-|---|---|---|
-| `controller/BookController` | Controller | 5 个端点，**极薄转发** |
-| `service/BookService` | Service 接口 | 5 个方法（分页/详情/编辑/删除/批量删除） |
-| `service/impl/BookServiceImpl` | Service 实现 | 三条业务规则（404 / 白名单组装 / 删前确认存在） |
-| `service/BookEnrichService` | Service | 「完善书籍信息」（2026-10-16）：用 `/book/info` 逐本补齐，5 并发 + 1~5 秒随机 + `category` 本地派生。**异步**（提交即返回 + 内存快照轮询，照 `BooklistSyncServiceImpl`），进度走 `GET /api/books/enrich/progress` |
-| `repository/BookRepository` | Repository | Mongo 访问：分页、upsert、局部更新、批量删 |
-| `req/BookQuery` | req | 18 个筛选条件（2026-10-16 新增 4 个：`missing` 缺失字段三档 / `booklistId` 书单 / `minTotalWords` 字数下限 / `enriched` 补齐状态）+ 排序白名单 + 分页归一化 |
-| `req/BookUpdateRequest` | req | 编辑请求体（**刻意不含不可改字段**） |
-| `req/BatchDeleteRequest` | req | 批量删除请求体 |
-| `req/BookEnrichRequest` | req | 「完善书籍信息」请求体（`bookIds`） |
-| `dto/EnrichResult` | dto | 「完善书籍信息」的执行统计 |
-| `entity/Book` | Entity | 46 个业务字段 + 4 个扩展字段 + **50 个 `book/info` 补充字段** + 采集元数据（含 `enrichedAt` = 「补齐试过」的标记）；12 个嵌套内部类 |
+| 类 | 职责 |
+|---|---|
+| `controller/BookController` | 7 个端点，薄转发 |
+| `service/BookService(Impl)` | 分页 / 详情 / 编辑 / 删除 / 批量删除；编辑只写传了的字段 |
+| `service/BookEnrichService` | 完善书籍信息：`/book/info` 逐本补齐，5 并发 + 1~5s 随机；异步 + 内存进度 |
+| `repository/BookRepository` | 分页、`upsertMany`、`upsertPaidMany`、局部更新、批量删 |
+| `req/BookQuery` | 筛选条件 + 排序白名单 + 分页归一化 |
+| `entity/Book` | 46 业务字段 + 4 扩展 + 50 个 `/book/info` 补充字段 + 采集元数据 |
 
-**几个容易忘的实现细节**：
+## 数据与索引
 
-- **`Book` 的结构**：12 个**嵌套内部类**（都 `implements Serializable`）——
-  原有的 `BookCategory` / `RatingDetail` / `MaxFreeInfo` / `BookListRef`，
-  加上 2026-10-16 为 `book/info` 补充字段新增的 `ScoreDetail` / `CopyrightInfo` /
-  `AuthorSeg` / `CoverBoxInfo` / `CoverColor` / `DominateColor` / `SkuInfo` / `ShortTimeRead`。
-  ⚠️ `newRating`（0~1000 的推荐值，**原样存**，展示层自己除 10）是**顶层字段**，
-  **不在** `RatingDetail` 里 —— 后者只有 `{good, fair, poor, recent, title}`。
-  接口的 `ratingDetail`（`one`~`five`）是**另一个**对象，映射到 `ScoreDetail`。
-- **`upsertMany` 用 `bulkOps(BulkMode.UNORDERED)`**：一次网络往返代替上千次。
-  **`UNORDERED`** 是有意的 —— 单条失败不该中断整批。
-- **`upsertMany` 的 Update 是手搓的原始 `Document`**（不是 `Update.set(...)` 链）：
-  因为它要同时下发 **`$set` + `$setOnInsert` + `$addToSet`** 三个操作符，而 `$set` 的内容是
-  「实体全字段」—— 逐个字段手写要 50 行且必然漏字段。
-  - 🔴 **`_id` 绝对不能出现在 `$set` 里** —— MongoDB 会直接报
-    `Performing an update on the path '_id' would modify the immutable field '_id'`。
-  - `firstCollectedAt` → **`$setOnInsert`**（「第一次采到的时间」永不被覆盖）
-  - `collectSource` → **`$addToSet`**（多来源累加，且不重复）
-- **`IN_QUERY_CHUNK = 1000`**：`findByBookIds` 和批量删除都按 1000 分片下发 `$in`，
-  避免单次 `$in` 过大。新增任何「按一批 id 查/删」的方法都要照做。
-- `upsertMany` 会**跳过没有 `bookId` 的记录**并打 warn（不是抛异常）——
-  采集侧偶尔会有脏节点，不该因此整批失败。
-- 🔴 **`upsertMany` 返回 `book.dto.UpsertStat`（不是 `int`）**，2026-10-08 改。
-  里面是 **`updated`（命中已有文档）/ `inserted`（真正插入）** 两个数，
-  `total()` 就是旧的「写入/更新」总数。
-  - 数据来源零成本：`BulkWriteResult.getMatchedCount()` 与 `getUpserts().size()`，
-    **原先就在取，只是相加后把区分丢掉了**。
-  - 为什么放 `book.dto` 而不是 `collector.dto`：消费方是 `collector`，
-    而 `collector → book` 本来就是单向的，反过来放会形成**包循环**。
-  - 谁在用：`collector.BookWriter.upsertAll` → `CollectLoop` → `CollectResult.booksInserted`
-    → 增量配置页的「新增」列。**仪表盘「今日新增」是另一个口径**（按 `firstCollectedAt` 聚合）。
+- `books`：`uk_bookId` 唯一（幂等写入的正确性依赖）、`idx_categories`、`idx_lastCollectedAt`、`idx_newRating`、`idx_firstCollectedAt`。
+- `lastCollectedAt` 每次 upsert 刷新；统计「今日新增」必须用 `firstCollectedAt`。
+- `paidCollect`（Integer）：`1` = 来自付费精选；默认 `null`。
 
-## 3. 调用关系（图谱）
-
-```
-BookController ──► BookService(Impl) ──► BookRepository ──► books
-                                              ▲
-                                              │ upsertMany（批量 upsert）
-                                              │
-                                        collector.BookWriter   ← 采集侧唯一的写入方
-```
-
-> `BookRepository` 被两个方向使用：**读/改**（本模块）和**写**（`collector.BookWriter`）。
-> 改它的 upsert 方法前先看 `collector` 模块的第 6 节铁律 1（并集语义）。
-
-## 4. 数据集合与索引
-
-| 集合 | 索引 | 为什么 |
-|---|---|---|
-| `books` | `uk_bookId` **唯一** | 🔴 **幂等 upsert 的正确性依赖**，不是性能优化 |
-| | `idx_categories` (`categories.categoryId`) | 按分类筛 |
-| | `idx_lastCollectedAt` | 「最近采过什么」 |
-| | `idx_newRating` | 按评分筛/排序 |
-| | `idx_firstCollectedAt` | 「每天新增了多少」（口径见 `stats`） |
-
-> `idx_lastCollectedAt` 与 `idx_firstCollectedAt` **不是重复索引**：前者服务
-> 「最近采过什么」，后者服务「每天新增了多少」（`lastCollectedAt` 每次 upsert 都刷新，
-> 重采会虚增，所以统计口径必须用 `firstCollectedAt`）。
-
-## 5. 对外接口
+## 接口
 
 | 方法 | 路由 | 说明 |
 |---|---|---|
-| GET | `/api/books` | 分页筛选。参数对象直接绑 `BookQuery`（22 个查询参数 = 18 个筛选 + 排序 2 + 分页 2） |
-| GET | `/api/books/{bookId}` | 详情（46 业务字段 + 采集元数据） |
-| PUT | `/api/books/{bookId}` | 编辑（**局部更新**，只写请求体里出现的字段） |
-| DELETE | `/api/books/{bookId}` | 单条删除。⚠️ 下次采集到会被重新写入（**删除不是永久拉黑**） |
-| POST | `/api/books/batch-delete` | 批量删除，返回 `requested` + `deleted`（**两者可能不同**） |
-| POST | `/api/books/enrich` | 完善书籍信息（2026-10-16）。**提交即返回**，不等它跑完 |
-| GET | `/api/books/enrich/progress` | 上面的进度快照（内存态，进程重启即归零，不做持久化） |
+| GET | `/api/books` | 分页筛选 |
+| GET | `/api/books/{bookId}` | 详情 |
+| PUT | `/api/books/{bookId}` | 局部更新（只写传了的字段） |
+| DELETE | `/api/books/{bookId}` | 单条删除（下次采集会重新写入） |
+| POST | `/api/books/batch-delete` | 批量删除（返回实际删除数） |
+| POST | `/api/books/enrich` | 完善书籍信息（提交即返回） |
+| GET | `/api/books/enrich/progress` | 进度（内存态） |
 
-**筛选条件（18 个）**：`categoryId`（一级分类）/ `subCategoryId`（二级分类）/ `minRating` / `maxRating` /
-`minReadingCount` / `newRatingTitle` / `targetType` + `targetId`（采集来源）/ `title` / `author` /
-`minPublishTime` / `maxPublishTime` / `minCollectedAt` + `maxCollectedAt`（采集时间）/
-**`missing`** / **`booklistId`** / **`minTotalWords`** / **`enriched`**（最后 4 个是 2026-10-16 新增，见下）。
+## 筛选
 
-⚠️ 2026-10-10 新增 `title` / `minCollectedAt` / `maxCollectedAt`；**2026-10-12 新增 `newRatingTitle` / `subCategoryId`**；
-⚠️ `categoryId` 与 `subCategoryId` 是 `categories[]` 里的**两个不同的键**（一级 / 二级），**不会同时非空**；
-把二级 code 当 `categoryId` 传会**恒不匹配、静默返回 0 条** —— 图书库页的「平台分类」用**一个级联框**同时覆盖两级。
-`title` 与 `author` 是**包含匹配**（走 `RegexUtil.contains`，未锚定正则用不上索引 —— 全集合扫描**已接受**）；
-`minCollectedAt` / `maxCollectedAt` 走 **Date 区间**（库字段 `lastCollectedAt` 是 Date），
-与出版时间的**字符串字典序**是**两种不同的比较方式**，别混。
-`newRatingTitle` 是**档位文案**精确匹配（`神作` / `好评如潮` / `评分不足` …），与 `minRating` /
-`maxRating` 的**数值**区间是**两回事**；传哨兵 `__NONE__`（`BookQuery.TITLE_NONE`）表示「暂无评级」
-—— 库里 46% 的书没有这个字段，MongoDB 的 `{field: null}` 会同时匹配「值是 null」与「字段不存在」。
+- 分类：`categoryId`（一级）/ `subCategoryId`（二级），**不能混用**（传错恒 0 条）。
+- 关键词：`title` / `author` **包含匹配**（未锚定正则，全集合扫描已接受）。
+- 评分：`minRating` / `maxRating`（库值 0~1000）；`newRatingTitle` 是档位文案精确匹配，`__NONE__` = 暂无评级。
+- 来源：`targetType` + `targetId`；`booklistId` 匹配 `bookLists.bookListId`。
+- 补齐：`missing`（CATEGORY / INTRO / BOTH）、`minTotalWords`、`enriched`。
+- 付费精选：`paidCollect`（`true` = 只要 `1`；`false` = 排除 `1` 与不存在）。
+- 排序白名单：`newRating` / `readingCount` / `newRatingCount` / `lastCollectedAt` / `publishTime`。
 
-**2026-10-16 新增的 4 个**（都为「完善书籍信息」这条链路服务）：
-- `missing`：`CATEGORY` / `INTRO` / `BOTH`（白名单，见 `BookQuery#resolveMissing()`）。
-  ⚠️ 只看 `category`（字符串）**不看** `categories`（数组）—— 已实测「缺 `categories` 的书
-  一定也缺 `category`」（7214 本全落在 26304 本之内），所以不漏书。
-- `booklistId`：匹配 `bookLists.bookListId`（数组任一元素命中即可，不需要 `$elemMatch`）。
-- `minTotalWords`：`totalWords >= N`。⚠️ `totalWords` 来自 `/book/info`，
-  **只有补过的书才有** —— 没补过的会被这个条件排除掉，这是数据决定的。
-- `enriched`：`enrichedAt` 存在 = 被「完善书籍信息」碰过。
-  🔴 存在的理由：**有的书平台本来就没有分类/简介**，补也补不出来；没有这个条件，
-  它们会永远留在「缺失信息」的筛选结果里，用户分不清「还没补」和「补不出来」。
-  真正的「待补清单」= `missing=BOTH` **加上** `enriched=false`。
-  ⚠️ 判据只能是这个**显式标记** —— 实测过「用补齐专属字段（`totalWords` 等）反推」行不通：
-  25889 本待补的书里只有 9 本带这些字段（补成功的书早就离开这个集合了）。
+## 不变量
 
-**排序字段白名单**（`BookQuery#resolveSortPath()`）：`newRating`（默认）/ `readingCount` /
-`newRatingCount` / `lastCollectedAt` / `publishTime`。
-
-## 6. 不变量与铁律 ← 改这个模块前必读
-
-1. **排序字段必须走白名单。** `resolveSortPath()` 把前端传的字符串映射成固定的 Mongo 路径，
-   不合法的一律回退 `newRating`。**绝不能**把用户传的字符串直接拼进 Mongo 路径 —— 那是注入面。
-
-2. **🔴 `newRating` 的路径是顶层 `newRating`，不是 `newRatingDetail.newRating`。**
-   `newRatingDetail` 的实际结构是 `{good, fair, poor, recent, title}`，里面**没有** `newRating`。
-   后果是**静默的**：排序指向不存在的字段不报错（只是「排了跟没排一样」），
-   而筛选会**永远返回 0 条**，页面不报错只是空列表。
-   这个坑在 S1/S2 的测试里照不出来（那些测试验的是「解析对不对」「索引建没建」），
-   S4 做仪表盘评分分布时发现柱图全是 0 才牵出来。
-
-3. **编辑一律「只写传了的字段」。** `BookServiceImpl.update` 用
-   `Map<String,Object> sets` + `putIfNotNull` 逐字段 `Update.set`，**绝不**用整本 `save()`。
-   为什么：整本 `save()` 要求前端把全部字段一个不落地回传，少传一个那个字段就被写成 null
-   —— 这是「隐式清空」，是最难发现的一类数据损坏。
-   一个字段都没传 → 报 `code=warn`「没有需要修改的字段」，不要静默成功。
-
-4. **不可改字段用「字段缺失」在类型层面挡住，不靠运行时 if。**
-   `BookUpdateRequest` 里干脆没有 `bookId` / `searchIdx` / `collectSource` / `firstCollectedAt`。
-   `collectSource` 与 `firstCollectedAt` 是采集元数据，改了会破坏来源统计与新增口径。
-
-5. **批量删除返回「实际删除条数」，不是请求条数。**
-   前端列表是上一次查询的快照，期间某本书可能已被另一个标签页删掉。
-   报「实际值」比报「请求值」诚实。
-
-6. **`maxPublishTime` 会把粗粒度输入补齐。** `"2023"` → `"2023-12-31 23:59:59"`，
-   `"2023-06"` → `"2023-06-31 23:59:59"`。为什么：`publishTime` 是定长字符串，
-   做的是**字符串**比较；不补齐的话 `"2023"` 做 `$lte` 会把 `"2023-08-01 00:00:00"` 排除掉。
-   `2023-06-31` 是不存在的日期，但没关系 —— 它只起「该月最大值」的作用，不会被解析成日期。
-
-7. **不做模糊搜索。** `author` 是**精确匹配**（`Criteria.is`），刻意不支持正则。
-
-## 7. 依赖与耦合
-
-- **依赖**：`common.{PageResult,BizException,ResultBean}`、`util.PageQueryUtil`（分页样板）。
-- **被依赖**：`collector.BookWriter`（写）、`stats`（聚合统计 `books`）。
-- 分页样板（count 短路 / 排序 / skip+limit）统一走 `PageQueryUtil`，本模块只提供
-  「条件怎么拼」（`buildCriteria`）和「按什么排」。
-
-## 8. 测试与验收
-
-| 测试 | 覆盖 |
-|---|---|
-| `S1DataLayerTest` | 数据层：upsert 幂等、索引存在性 |
-| `BookQuerySemanticsIT` | **筛选/排序语义**（含 `newRating` 路径回归）、`StatsService` 聚合 |
-| `ApiCrudIT` | 端到端 CRUD 契约 |
-
-```bash
-tools/mvn8.sh -f backend/pom.xml -o -B test -Dtest=BookQuerySemanticsIT
-```
-
-## 9. 已知陷阱（现象 → 根因 → 修法）
-
-### 9.1 筛选永远返回 0 条，且不报错
-
-- **现象**：按评分筛选（`minRating=800`）永远空列表；按评分排序看不出效果。
-- **根因**：`Criteria.where("newRatingDetail.newRating")` —— 这个字段不存在。
-  `$match` 匹配不到任何文档时**不抛异常**，只是返回空。
-- **修法**：路径改回顶层 `newRating`。**三处都要改**：`BookRepository.buildCriteria`、
-  `BookQuery.resolveSortPath()`、`MongoIndexInitializer` 的 `idx_newRating`
-  （索引已建在错字段上时，靠 `dropIndexIfFieldChanged` 在启动时自愈）。
-
-### 9.2 删除图书后又「复活」了
-
-- **现象**：删掉一本书，下次采集它又回来了。
-- **根因**：这是**设计使然** —— `books` 是「历史累计的并集」，删除不是永久拉黑。
-- **修法**：不是缺陷。接口的 `@Operation(description = ...)` 里已明确写了这一点，
-  前端提示也要说清楚。
+1. 排序字段必须走 `BookQuery#resolveSortPath()` 白名单，不能把用户字符串拼进 Mongo 路径。
+2. `newRating` 是**顶层字段**，不是 `newRatingDetail.newRating`（后者只有 good / fair / poor / recent / title）。
+3. 编辑只写请求体里出现的字段（`Update.set` 逐字段）；绝不整本 `save()`（隐式清空）。
+4. 不可改字段（`bookId` / `searchIdx` / `collectSource` / `firstCollectedAt`）在 `BookUpdateRequest` 里直接不存在。
+5. 批量删除返回**实际删除数**（列表可能是旧快照）。
+6. `maxPublishTime` 粗粒度补齐（`2023` → `2023-12-31 23:59:59`）：`publishTime` 是定长字符串、按字典序比较。
+7. `upsertMany` 用 `bulkOps(UNORDERED)` + 手搓 `Document`（`$set` + `$setOnInsert` + `$addToSet`）；`_id` 不能进 `$set`。
+8. `upsertPaidMany`：不存在才插入全字段；已存在只 `$addToSet collectSource` + `$set paidCollect=1`，不覆盖其它字段。
+9. 按 id 批量查 / 删按 `IN_QUERY_CHUNK = 1000` 分片。

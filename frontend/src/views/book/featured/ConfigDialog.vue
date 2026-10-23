@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { listBooklistOptions } from '@/api/booklist'
 import { collectCandidates, getPublishJob, previewCandidates } from '@/api/publish'
 import { listTaxonomy } from '@/api/taxonomy'
 import ProTable from '@/components/ProTable.vue'
 import { dash, formatNumber } from '@/utils/format'
-import type { CandidateBookVO, CandidateBuildRequest, TaxonomyItem } from '@/types'
+import type { BooklistOption, CandidateBookVO, CandidateBuildRequest, TaxonomyItem } from '@/types'
 
 /**
  * 精选配置（2026-10-12 新增）—— 从「重置精选」演化来的弹窗。
@@ -19,10 +20,9 @@ import type { CandidateBookVO, CandidateBuildRequest, TaxonomyItem } from '@/typ
  * 精选是把命中的书**快照进** `book_interpretations`（`POST /api/publish/candidates/collect`）。
  * 已有的 bookId 一律跳过，所以可以反复执行。
  *
- * <h3>三套筛选条件互不叠加</h3>
- * 「评论标题」「推荐值大于」「书名/作者」各带一个「精选预览」按钮，
- * 点哪个就**只按哪一套**查（用户 2026-10-12 明确「两套独立」）。
- * 三套一起叠上去的话，用户勾着 5 个标签又填了推荐值时会得到一堆莫名其妙的结果。
+ * <h3>两种搜法</h3>
+ * 每行各带一个「只按此搜」（只发该条件）；底部「按以上组合搜索」把所有非空条件 AND。
+ * 「隐藏已精选」是收窄项，两种搜法都带上。
  *
  * <h3>🔴 精选是「提交即返回」的长任务</h3>
  * 「全部精选」可能命中几千本、要几十秒。`collectCandidates()` 一返回只说明任务已受理，
@@ -81,8 +81,8 @@ const CANDIDATE_CATEGORY_NAMES = [
  */
 const CANDIDATE_RATING_TITLES = ['神作', '好评如潮', '神作潜力', '脍炙人口', '值得一读']
 
-/** 「精选预览」的三个入口，对应三套互不叠加的条件 */
-type PreviewSource = 'rating' | 'score' | 'keyword'
+/** 搜索入口：每行一个「只按此搜」；all = 底部「按以上组合搜索」 */
+type PreviewSource = 'category' | 'rating' | 'score' | 'keyword' | 'booklist' | 'all'
 
 // ---------------------------------------------------------------------------
 // 筛选条件
@@ -95,6 +95,20 @@ const title = ref('')
 const author = ref('')
 /** 隐藏已精选。默认开 —— 精选的目的就是补充新书，把已有的再列一遍没有意义 */
 const excludeCollected = ref(true)
+
+const booklistId = ref('')
+const booklistOptions = ref<BooklistOption[]>([])
+
+/** 是否至少有一个非空条件（底部「按以上组合搜索」用） */
+const hasAnyFilter = computed(
+  () =>
+    categoryIds.value.length > 0 ||
+    ratingTitles.value.length > 0 ||
+    (minRating.value !== undefined && minRating.value !== null) ||
+    !!title.value.trim() ||
+    !!author.value.trim() ||
+    !!booklistId.value,
+)
 
 /** 字典：只用到分类 */
 const categories = ref<TaxonomyItem[]>([])
@@ -127,6 +141,14 @@ async function loadDict(): Promise<void> {
   } catch {
     // 字典拉不到不影响弹窗打开，但分类会全空 —— 用户点预览时会看到「请至少选择一个平台分类」
     categories.value = []
+  }
+}
+
+async function loadBooklists(): Promise<void> {
+  try {
+    booklistOptions.value = await listBooklistOptions()
+  } catch {
+    booklistOptions.value = []
   }
 }
 
@@ -163,16 +185,24 @@ const lastRequest = ref<CandidateBuildRequest | null>(null)
 /** 按入口组装请求体。三套条件互不叠加，所以每次只带一套 */
 function buildRequest(source: PreviewSource): CandidateBuildRequest {
   const req: CandidateBuildRequest = {
-    categoryIds: [...categoryIds.value],
     excludeCollected: excludeCollected.value,
   }
-  if (source === 'rating') {
+  const all = source === 'all'
+  if (all || source === 'category') {
+    req.categoryIds = [...categoryIds.value]
+  }
+  if (all || source === 'rating') {
     req.ratingTitles = [...ratingTitles.value]
-  } else if (source === 'score') {
+  }
+  if (all || source === 'score') {
     req.minRating = minRating.value
-  } else {
+  }
+  if (all || source === 'keyword') {
     req.title = title.value.trim() || undefined
     req.author = author.value.trim() || undefined
+  }
+  if ((all || source === 'booklist') && booklistId.value) {
+    req.booklistId = booklistId.value
   }
   return req
 }
@@ -184,20 +214,31 @@ function buildRequest(source: PreviewSource): CandidateBuildRequest {
  * 却收到「请至少选择一个平台分类」，会一脸茫然。
  */
 function validate(source: PreviewSource): boolean {
-  if (categoryIds.value.length === 0) {
-    ElMessage.warning('请至少选择一个平台分类')
+  if (source === 'all') {
+    if (!hasAnyFilter.value) {
+      ElMessage.warning('请至少给出一个筛选条件')
+      return false
+    }
+    return true
+  }
+  if (source === 'category' && categoryIds.value.length === 0) {
+    ElMessage.warning('请至少勾选一个平台分类')
     return false
   }
   if (source === 'rating' && ratingTitles.value.length === 0) {
     ElMessage.warning('请至少勾选一个评论标题')
     return false
   }
-  if (source === 'score' && minRating.value === undefined) {
+  if (source === 'score' && (minRating.value === undefined || minRating.value === null)) {
     ElMessage.warning('请填写推荐值下限')
     return false
   }
   if (source === 'keyword' && !title.value.trim() && !author.value.trim()) {
     ElMessage.warning('请填写书名或作者')
+    return false
+  }
+  if (source === 'booklist' && !booklistId.value) {
+    ElMessage.warning('请选择一个书单')
     return false
   }
   return true
@@ -329,7 +370,7 @@ async function syncCollectState(): Promise<void> {
 
 async function onCollect(all: boolean): Promise<void> {
   if (!lastRequest.value) {
-    ElMessage.warning('请先点「精选预览」确定范围')
+    ElMessage.warning('请先搜索（只按此搜 / 按以上组合搜索）确定范围')
     return
   }
   const req: CandidateBuildRequest = { ...lastRequest.value, all }
@@ -379,6 +420,7 @@ function resetPreview(): void {
   lastRequest.value = null
 }
 
+
 function onVisibleChange(v: boolean): void {
   emit('update:modelValue', v)
   if (!v) {
@@ -398,6 +440,10 @@ watch(
     if (categories.value.length === 0) {
       await loadDict()
     }
+    if (booklistOptions.value.length === 0) {
+      await loadBooklists()
+    }
+    booklistId.value = ''
     ratingTitles.value = [...CANDIDATE_RATING_TITLES]
     minRating.value = undefined
     title.value = ''
@@ -451,12 +497,9 @@ function onSelectionChange(list: unknown[]): void {
   >
     <!-- ============ 筛选区（平铺） ============ -->
     <div class="filters">
-      <!-- 1. 平台分类（一级，必选，默认全选） -->
+      <!-- 1. 平台分类 -->
       <div class="filter-row">
-        <div class="filter-label">
-          平台分类
-          <span class="required">*</span>
-        </div>
+        <div class="filter-label">平台分类</div>
         <div class="filter-body">
           <el-checkbox-group v-model="categoryIds">
             <el-checkbox
@@ -468,13 +511,21 @@ function onSelectionChange(list: unknown[]): void {
               {{ opt.name }}
             </el-checkbox>
           </el-checkbox-group>
+          <el-button
+            :type="categoryIds.length > 0 ? 'primary' : 'info'"
+            :disabled="categoryIds.length === 0"
+            :loading="previewLoading && previewSource === 'category'"
+            @click="runPreview('category')"
+          >
+            只按此搜
+          </el-button>
           <div v-if="missingCategoryNames.length" class="warn">
             字典里找不到这些分类，已禁用：{{ missingCategoryNames.join('、') }}
           </div>
         </div>
       </div>
 
-      <!-- 2. 评论标题（默认全勾） -->
+      <!-- 2. 评论标题 -->
       <div class="filter-row">
         <div class="filter-label">评论标题</div>
         <div class="filter-body">
@@ -484,12 +535,12 @@ function onSelectionChange(list: unknown[]): void {
             </el-checkbox>
           </el-checkbox-group>
           <el-button
-            v-if="ratingTitles.length > 0"
             type="primary"
+            :disabled="ratingTitles.length === 0"
             :loading="previewLoading && previewSource === 'rating'"
             @click="runPreview('rating')"
           >
-            精选预览
+            只按此搜
           </el-button>
         </div>
       </div>
@@ -508,12 +559,12 @@ function onSelectionChange(list: unknown[]): void {
           />
           <span class="unit">%</span>
           <el-button
-            v-if="minRating !== undefined && minRating !== null"
             type="primary"
+            :disabled="minRating === undefined || minRating === null"
             :loading="previewLoading && previewSource === 'score'"
             @click="runPreview('score')"
           >
-            精选预览
+            只按此搜
           </el-button>
         </div>
       </div>
@@ -530,12 +581,41 @@ function onSelectionChange(list: unknown[]): void {
             :loading="previewLoading && previewSource === 'keyword'"
             @click="runPreview('keyword')"
           >
-            精选预览
+            只按此搜
           </el-button>
         </div>
       </div>
 
-      <!-- 5. 隐藏已精选 -->
+      <!-- 5. 书单 -->
+      <div class="filter-row">
+        <div class="filter-label">书单</div>
+        <div class="filter-body">
+          <el-select
+            v-model="booklistId"
+            filterable
+            clearable
+            placeholder="选择一个书单"
+            class="booklist-select"
+          >
+            <el-option
+              v-for="opt in booklistOptions"
+              :key="opt.booklistId"
+              :label="opt.name || opt.booklistId"
+              :value="opt.booklistId"
+            />
+          </el-select>
+          <el-button
+            type="primary"
+            :disabled="!booklistId"
+            :loading="previewLoading && previewSource === 'booklist'"
+            @click="runPreview('booklist')"
+          >
+            只按此搜
+          </el-button>
+        </div>
+      </div>
+
+      <!-- 6. 隐藏已精选 -->
       <div class="filter-row">
         <div class="filter-label"></div>
         <div class="filter-body">
@@ -544,12 +624,29 @@ function onSelectionChange(list: unknown[]): void {
           </el-checkbox>
         </div>
       </div>
+
+      <!-- 7. 组合搜索：所有非空条件 AND -->
+      <div class="filter-row combo-row">
+        <div class="filter-label"></div>
+        <div class="filter-body">
+          <el-button
+            type="primary"
+            size="large"
+            :disabled="!hasAnyFilter"
+            :loading="previewLoading && previewSource === 'all'"
+            @click="runPreview('all')"
+          >
+            按以上组合搜索
+          </el-button>
+          <span class="combo-hint">非空条件全部 AND</span>
+        </div>
+      </div>
     </div>
 
     <!-- ============ 预览结果 ============ -->
     <div class="preview">
       <div v-if="!previewed" class="preview-empty">
-        调好上面的条件后，点任意一处「精选预览」查看命中的图书。
+        点某行的「只按此搜」只按该条件查；或点底部「按以上组合搜索」按所有非空条件 AND 查。
       </div>
 
       <ProTable
@@ -631,6 +728,19 @@ function onSelectionChange(list: unknown[]): void {
 </template>
 
 <style scoped>
+.booklist-select {
+  width: 360px;
+}
+
+.combo-row {
+  padding-top: 4px;
+}
+
+.combo-hint {
+  font-size: 12px;
+  color: #909399;
+}
+
 .filters {
   display: flex;
   flex-direction: column;

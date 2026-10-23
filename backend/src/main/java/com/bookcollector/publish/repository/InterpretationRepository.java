@@ -352,6 +352,10 @@ public class InterpretationRepository {
         if (author != null) {
             conds.add(Criteria.where("author").regex(author));
         }
+        String booklistId = req.resolveBooklistId();
+        if (booklistId != null) {
+            conds.add(Criteria.where("bookLists.bookListId").is(booklistId));
+        }
         if (req.excludeCollected()) {
             List<String> collected = listExistingBookIds();
             if (!collected.isEmpty()) {
